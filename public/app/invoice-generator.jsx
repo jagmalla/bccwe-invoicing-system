@@ -56,9 +56,9 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
   const [pricePrompt, setPricePrompt] = useState(null);
   const [, bump] = useState(0);
   const force = () => bump((x) => x + 1);
-  const [discMode, setDiscMode] = useState("amount");
-  const [discVal, setDiscVal] = useState(0);
-  const [discTiming, setDiscTiming] = useState("before");
+  const [discMode, setDiscMode] = useState(edit && edit.discMode ? edit.discMode : "amount");
+  const [discVal, setDiscVal] = useState(edit && edit.discVal != null ? edit.discVal : 0);
+  const [discTiming, setDiscTiming] = useState(edit && edit.discTiming ? edit.discTiming : "before");
   const [charges, setCharges] = useState(edit && edit.charges ? edit.charges.map((c) => ({ id: c.id || Date.now() + Math.random(), label: c.label, amount: c.amount, taxable: !!c.taxable })) : []);
 
   function addCharge() {
@@ -217,8 +217,12 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
 
   async function save() {
     const rec = {
-      no: invNo, companyId, clientId, date, due, terms, kind: docKind, sales: salesId, tax: taxMode,
+      no: edit ? edit.no : invNo, // never rename on edit — payments/credit notes/mail reference the number
+      companyId, clientId, date, due, terms, kind: docKind, sales: salesId, tax: taxMode,
       subtotal: calc.subtotal, gst: calc.gst, pst: calc.pst, total: calc.total,
+      // Persist the invoice-level discount so editing restores it (previously it
+      // reset to zero on edit, silently re-inflating the total on the next save).
+      discMode, discVal: Number(discVal) || 0, discTiming, invDisc: calc.invDisc,
       paid: Number(payAmt) || 0, refunded: edit ? (edit.refunded || 0) : refund, status, notes, payMethod,
       lines: lines.map((l) => ({ desc: l.desc, code: l.code, qty: l.qty, price: l.price, disc: l.disc, cost: l.cost })),
       charges: charges.map((c) => ({ id: c.id, label: c.label, amount: Number(c.amount) || 0, taxable: !!c.taxable })),
@@ -230,10 +234,16 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
     if (edit) {
       const idx = D.invoices.findIndex((i) => i.no === edit.no);
       const prev = idx >= 0 ? D.invoices[idx] : null;
-      const oldQ = {}; ((prev && prev.lines) || []).forEach((l) => { if (l.code) oldQ[l.code] = (oldQ[l.code] || 0) + (l.qty || 0); });
+      // Only adjust stock for invoices created WITH real line data. A legacy
+      // (line-less) invoice never recorded which units were sold, so its
+      // original stock decrement is unknown — the previous code built oldQ as
+      // empty and decremented the full (invented) prefill quantities, silently
+      // removing stock for units that were never actually recorded.
+      const hadRealLines = !!(prev && prev.lines && prev.lines.length);
+      const oldQ = {}; (hadRealLines ? prev.lines : []).forEach((l) => { if (l.code) oldQ[l.code] = (oldQ[l.code] || 0) + (l.qty || 0); });
       const newQ = {}; lines.forEach((l) => { if (l.code && l.qty > 0) newQ[l.code] = (newQ[l.code] || 0) + l.qty; });
       const adj = [];
-      if (docKind !== "order") Object.keys(Object.assign({}, oldQ, newQ)).forEach((code) => {
+      if (docKind !== "order" && hadRealLines) Object.keys(Object.assign({}, oldQ, newQ)).forEach((code) => {
         const it = stockable(code); if (!it) return;
         const delta = (newQ[code] || 0) - (oldQ[code] || 0);
         if (delta) { it.stock -= delta; adj.push([it, delta]); }
@@ -248,7 +258,9 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
     }
 
     const addedSales = [];
-    if (clientId) lines.forEach((l) => { if (l.code && l.qty > 0) { const e = { date, code: l.code, clientId, qty: l.qty, price: l.price, disc: l.disc || 0 }; D.itemSales.unshift(e); addedSales.push(e); } });
+    // Orders aren't sales until converted — don't record item sales for them
+    // (they were polluting price history and per-item analytics).
+    if (clientId && docKind !== "order") lines.forEach((l) => { if (l.code && l.qty > 0) { const e = { date, code: l.code, clientId, qty: l.qty, price: l.price, disc: l.disc || 0 }; D.itemSales.unshift(e); addedSales.push(e); } });
     const adj = [];
     if (docKind !== "order") lines.forEach((l) => { if (l.code && l.qty > 0) { const it = stockable(l.code); if (it) { it.stock -= l.qty; adj.push([it, l.qty]); } } });
     D.invoices.unshift(rec);
@@ -330,7 +342,7 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
                 )}
               </Field>
               <Field label="Invoice #" hint="Auto-allocated — override allowed">
-                <input value={invNo} onChange={(e) => { setInvNo(e.target.value); setInvNoTouched(true); }} />
+                <input value={invNo} readOnly={!!edit} title={edit ? "The invoice number can't be changed when editing" : undefined} onChange={(e) => { if (edit) return; setInvNo(e.target.value); setInvNoTouched(true); }} />
               </Field>
               <Field label="Invoice date">
                 <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -648,8 +660,10 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
         </aside>
       </div>
 
-      {showPreview && <InvoicePreview {...{ invNo, date, due, client, lines, calc, taxMode, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company: storeObj, onClose: () => setShowPreview(false) }} />}
-      {showEmail && <EmailModal client={client} invNo={invNo} total={calc.total} onClose={() => setShowEmail(false)} pushToast={pushToast} />}
+      {showPreview && <InvoicePreview {...{ invNo, date, due, client, lines, calc, taxMode, discMode, discVal, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company: storeObj, onEmail: () => { setShowPreview(false); setShowEmail(true); }, onClose: () => setShowPreview(false) }} />}
+      {showEmail && <EmailModal client={client} invNo={invNo} total={calc.total}
+        invData={{ no: invNo, companyId, clientId, date, due, status, subtotal: calc.subtotal, gst: calc.gst, pst: calc.pst, total: calc.total, paid: Number(payAmt) || 0, invDisc: calc.invDisc, discTiming, lines: lines.map((l) => ({ desc: l.desc, code: l.code, qty: l.qty, price: l.price, disc: l.disc, cost: l.cost })) }}
+        onClose={() => setShowEmail(false)} pushToast={pushToast} />}
       {showAddClient && (
         <AddClientModal
           initialName={addClientName}
@@ -844,14 +858,14 @@ function Row({ k, v, muted, bold, pos }) {
   );
 }
 
-function InvoicePreview({ invNo, date, due, client, lines, calc, taxMode, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company, onClose }) {
+function InvoicePreview({ invNo, date, due, client, lines, calc, taxMode, discMode, discVal, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company, onEmail, onClose }) {
   const C = company || BCCWE.company;
   const on = (k) => (C.show ? C.show[k] !== false : true);
   const m = BCCWE.TAX.modes[taxMode];
   return (
     <Modal title={"Invoice preview — " + invNo} onClose={onClose} wide
       footer={<>
-        <Btn variant="ghost" icon="mail" onClick={onClose}>Email to client</Btn>
+        <Btn variant="ghost" icon="mail" onClick={onEmail || onClose}>Email to client</Btn>
         <Btn variant="primary" icon="download" onClick={() => window.downloadInvoicePdf(document.getElementById("inv-paper"), invNo + ".pdf")}>Download PDF</Btn>
       </>}>
       <div className="inv-paper" id="inv-paper">
@@ -941,8 +955,8 @@ function InvoicePreview({ invNo, date, due, client, lines, calc, taxMode, notes,
   );
 }
 
-function EmailModal({ client, invNo, total, onClose, pushToast }) {
-  const emails = client && client.emails.length ? client.emails : [];
+function EmailModal({ client, invNo, total, invData, onClose, pushToast }) {
+  const emails = client && client.emails && client.emails.length ? client.emails : [];
   const di = BCCWE.prefs.defaultInvoiceEmail || "";
   const [sel, setSel] = useState(() => { const n = new Set(); if (client && client.defaultEmail) n.add(client.defaultEmail); if (di) n.add(di); return n; });
   const [extra, setExtra] = useState("");
@@ -973,8 +987,17 @@ function EmailModal({ client, invNo, total, onClose, pushToast }) {
                 : "Sending to " + recipients.length + " recipient(s) (PDF could not be generated)…");
               onClose();
             };
-            if (paper && window.invoicePdfBase64) window.invoicePdfBase64(paper).then(finish).catch(() => finish(""));
-            else finish("");
+            // Fall back to building the PDF straight from the invoice data when
+            // there is no on-screen paper (e.g. emailing from the generator,
+            // where the preview modal isn't mounted) — previously this sent the
+            // email with NO attachment despite promising one.
+            const fromData = () => {
+              if (invData && window.invoicePdfBase64FromData) {
+                try { finish(window.invoicePdfBase64FromData(invData) || ""); } catch (e) { finish(""); }
+              } else finish("");
+            };
+            if (paper && window.invoicePdfBase64) window.invoicePdfBase64(paper).then(finish).catch(fromData);
+            else fromData();
           }}>
           Send ({recipients.length})
         </Btn>

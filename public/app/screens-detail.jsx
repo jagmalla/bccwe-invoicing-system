@@ -210,11 +210,31 @@ function InvoiceDetail({ no, go, pushToast }) {
     pushToast && pushToast((isReturn ? "Return " : "Exchange ") + cn.no + " recorded against " + inv.no);
     force((x) => x + 1);
   }
-  function convertOrder() {
+  async function convertOrder() {
+    // Orders don't touch stock until they become a real sale — deduct now, and
+    // record the item sales for analytics. Snapshot so a failed save rolls back.
+    const snap = {};
+    try { snap.inventory = JSON.parse(JSON.stringify(D.inventory || [])); snap.itemSales = JSON.parse(JSON.stringify(D.itemSales || [])); } catch (e) {}
+    const prevKind = inv.kind, prevStatus = inv.status;
+    const lines = (inv.lines && inv.lines.length) ? inv.lines : [];
+    lines.forEach((l) => {
+      if (!l.code || !(l.qty > 0)) return;
+      const it = D.inventory.find((x) => x.code === l.code);
+      if (it) it.stock = (it.stock || 0) - l.qty;
+      if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: l.qty, price: l.price, disc: l.disc || 0 });
+    });
     inv.kind = "sale";
     inv.status = invStatus(inv); // the deposit now counts as a payment toward the sale
     window.logAudit("UPDATE", "Invoice", "invoices", inv.no, "Converted order invoice to sales invoice — deposit " + fmt(inv.paid || 0) + " applied");
-    if (window.persist) window.persist("invoices");
+    const ok = window.persistNow ? await window.persistNow("invoices", "inventory", "itemSales") : true;
+    if (!ok) {
+      inv.kind = prevKind; inv.status = prevStatus;
+      if (snap.inventory) D.inventory = snap.inventory;
+      if (snap.itemSales) D.itemSales = snap.itemSales;
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+      force((x) => x + 1);
+      return;
+    }
     pushToast && pushToast(inv.no + " converted to a sales invoice");
     force((x) => x + 1);
   }
@@ -340,8 +360,10 @@ function InvoiceDetail({ no, go, pushToast }) {
               </div>
               <div className="ip-totals">
                 <div><span>Subtotal</span><span>{fmt(inv.subtotal)}</span></div>
+                {inv.invDisc > 0.005 && inv.discTiming !== "after" && <div><span>Discount</span><span>-{fmt(inv.invDisc)}</span></div>}
                 {inv.gst > 0 && <div><span>GST 5%</span><span>{fmt(inv.gst)}</span></div>}
                 {inv.pst > 0 && <div><span>PST 7%</span><span>{fmt(inv.pst)}</span></div>}
+                {inv.invDisc > 0.005 && inv.discTiming === "after" && <div><span>Discount · post-tax</span><span>-{fmt(inv.invDisc)}</span></div>}
                 <div className="ip-grand"><span>Total CAD</span><span>{fmt(inv.total)}</span></div>
                 {inv.paid > 0 && <div><span>Paid</span><span>-{fmt(inv.paid)}</span></div>}
                 {refunded > 0 && <div className="ip-bal ip-refund"><span>Refund paid</span><span>{fmt(refunded)}</span></div>}

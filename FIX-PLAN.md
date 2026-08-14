@@ -190,20 +190,30 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
       full plug until 1300 flows properly, then plug only sub-penny and warn on the rest.
 - **Verify:** build a known set of transactions; confirm Trial Balance balances *without* the plug and P&L = TB.
 
-### Phase 6 — Invoice creation & edit integrity  · CRITICAL/HIGH
-- [ ] **Invoice discount never persisted → totals silently re-inflate on edit** and P&L overstates revenue.
-      `invoice-generator.jsx:219-225` → persist `invDisc/discMode/discVal/discTiming`; restore on edit; render/deduct downstream.
-- [ ] **Preview crashes (`ReferenceError: discMode`) when a discount is set** → error boundary destroys the
-      in-progress invoice. `invoice-generator.jsx:924,929` → pass `discMode/discVal` as props.
-- [ ] **Editing a legacy (line-less) invoice decrements stock for invented lines.** `invoice-generator.jsx:233-239`
-      → build `oldQ` from `deriveLines(prev)` symmetrically, or skip deltas when `prev.lines` absent.
-- [ ] **Order→sale conversion never decrements stock.** `screens-detail.jsx:213-220` → decrement + persist inventory in `convertOrder`.
-- [ ] **Renaming the invoice # on edit orphans payments / credit notes / mailLog.** `invoice-generator.jsx:220,231`
-      → lock the number on edit (or cascade the rename).
-- [ ] **`itemSales` written for orders and never maintained on edit** → stale analytics. → guard on `docKind!=="order"`; diff on edit.
-- [ ] **Email from the generator never attaches the PDF; preview's "Email to client" only closes the modal.**
-      `invoice-generator.jsx:854,963-977` → render a hidden paper (or build from data) and wire the button.
-- **Verify:** discounted invoice round-trips through save→edit→save unchanged; preview opens; order conversion moves stock once.
+### Phase 6 — Invoice creation & edit integrity  · CRITICAL/HIGH  *(done)*
+- [x] **Invoice discount never persisted → totals silently re-inflate on edit.**
+      `invoice-generator.jsx` → `discMode/discVal/discTiming/invDisc` persisted on the record and restored on edit;
+      the invoice-detail paper now renders the discount line so subtotal ± discount + tax = total. *(done)*
+- [x] **Preview crashes (`ReferenceError: discMode`) when a discount is set.**
+      → `discMode/discVal` passed as props to `InvoicePreview`. *(done)*
+- [x] **Editing a legacy (line-less) invoice decrements stock for invented lines.** `invoice-generator.jsx`
+      → stock is only adjusted when the invoice has REAL stored lines; legacy edits skip stock (original decrement
+      unknown), so no fabricated movement. *(done)*
+- [x] **Order→sale conversion never decrements stock.** `screens-detail.jsx` → `convertOrder` now deducts stock,
+      records item sales, and uses `persistNow` with snapshot rollback. *(done)*
+- [x] **Renaming the invoice # on edit orphans payments / credit notes / mailLog.** `invoice-generator.jsx`
+      → the number is locked on edit (record keeps `edit.no`; the field is read-only). *(done)*
+- [x] **`itemSales` written for orders** → guarded on `docKind !== "order"` at create and added on conversion.
+      *(Edit-time itemSales diffing is NOT done — itemSales rows carry no invoice reference, so they can't be located
+      to update; noted as a data-model limitation for a later pass.)*
+- [x] **Email from the generator never attaches the PDF; preview's "Email to client" only closed the modal.**
+      `invoice-generator.jsx` → EmailModal falls back to `invoicePdfBase64FromData(invData)` when no on-screen paper
+      exists; the preview's Email button now opens the email modal. *(done)*
+- [x] **(Tier 3) Cost-at-sale.** Confirmed new invoices already store `cost` per line, so COGS uses the recorded
+      cost, not the live catalogue. Only legacy line-less invoices still fabricate COGS (unfixable history). *(done)*
+- **Verify:** discounted invoice round-trips save→edit→save unchanged (checked by logic: `calc.invDisc` recomputes
+      identically from restored `discMode/discVal/discTiming`); preview opens with a discount; order conversion moves
+      stock once. **Browser smoke-test recommended on the live site.**
 
 ### Phase 7 — Returns & exchanges correctness  · CRITICAL/HIGH
 - [ ] **No cumulative prior-return check → the same invoice can be fully returned repeatedly** (unlimited refunds,
