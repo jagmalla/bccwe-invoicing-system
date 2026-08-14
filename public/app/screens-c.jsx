@@ -143,9 +143,32 @@ function cnMatch(cn, filter) {
   if (!filter || filter === "all") return true;
   return cnStoreId(cn) === filter;
 }
+// Cost side of a credit note: goods coming back reverse COGS (restocked → back
+// to stock; defective → reclassified to Loss on Defective Goods 5100), and
+// replacement goods sent out on an exchange add COGS. Defective cost comes from
+// the defectiveProducts rows the return wrote (ref = the CN number) — captured
+// at return time. Seed/legacy CNs have no items[] and contribute nothing.
+function cnCosts(cn) {
+  const D = BCCWE;
+  let restock = 0, defect = 0, exchangeOut = 0;
+  if (cn.retDisp === "Inventory") (cn.items || []).forEach((l) => {
+    if (!l.code || !(l.qty > 0)) return;
+    const it = (D.inventory || []).find((x) => x.code === l.code);
+    restock += (it ? (it.cost || 0) : 0) * l.qty;
+  });
+  if (cn.retDisp === "Defected") (D.defectiveProducts || []).forEach((d) => {
+    if (d.ref === cn.no) defect += d.costLoss || 0;
+  });
+  (cn.exchangeItems || []).forEach((l) => {
+    if (!l.code || !(l.qty > 0)) return;
+    const it = (D.inventory || []).find((x) => x.code === l.code);
+    exchangeOut += (it ? (it.cost || 0) : 0) * l.qty;
+  });
+  return { restock, defect, exchangeOut };
+}
 function storeFinance(filter) {
   const D = BCCWE;
-  let revenue = 0, cogs = 0, gst = 0, pst = 0, restock = 0;
+  let revenue = 0, cogs = 0, gst = 0, pst = 0, restock = 0, writeOff = 0, gstITC = 0;
   (D.invoices || []).forEach((i) => {
     if (!storeMatch(i, filter)) return;
     if (i.kind === "order") return; // order invoices aren't sales yet — no revenue
@@ -161,22 +184,35 @@ function storeFinance(filter) {
     revenue += cn.subtotal || 0;   // negative on returns → reduces revenue
     gst += cn.gst || 0; pst += cn.pst || 0;
     restock += cn.restockingFee || 0;
+    const cc = cnCosts(cn);
+    cogs += cc.exchangeOut - cc.restock - cc.defect; // goods back reverse COGS; replacements out add it
+    writeOff += cc.defect;                            // defective cost reclassified to 5100
   });
   (D.cashSales || []).forEach((s) => {
     if (!storeMatch(s, filter)) return;
     revenue += s.subtotal != null ? s.subtotal : (s.total || 0);
-    gst += s.gst || 0; pst += s.pst || 0; cogs += s.cogs || 0; restock += s.restockingFee || 0;
+    gst += s.gst || 0; pst += s.pst || 0; restock += s.restockingFee || 0;
+    cogs += (s.cogs || 0) - (s.defLoss || 0); // defective units reclassify out of COGS…
+    writeOff += s.defLoss || 0;               // …into write-off losses
   });
   const opexByName = {}; let opex = 0;
   (D.expenses || []).forEach((e) => {
     if (!storeMatch(e, filter)) return;
+    // Expense amounts are entered PRE-tax (see seed JE-2049). BC PST on inputs
+    // is not recoverable → it is part of the cost; GST paid is an input tax
+    // credit claimed against GST collected (shown on the tax report).
+    const m = (D.TAX && D.TAX.modes && D.TAX.modes[e.tax]) || null;
+    const gstPaid = m ? (e.amount || 0) * (m.gst || 0) : 0;
+    const pstPaid = m ? (e.amount || 0) * (m.pst || 0) : 0;
+    const cost = (e.amount || 0) + pstPaid;
     const cat = e.category || "Other";
-    opexByName[cat] = (opexByName[cat] || 0) + (e.amount || 0);
-    opex += e.amount || 0;
+    opexByName[cat] = (opexByName[cat] || 0) + cost;
+    opex += cost;
+    gstITC += gstPaid;
   });
   const grossProfit = revenue - cogs;
-  const netIncome = grossProfit + restock - opex;
-  return { revenue, cogs, grossProfit, opex, opexByName, restock, gst, pst, netIncome };
+  const netIncome = grossProfit + restock - opex - writeOff;
+  return { revenue, cogs, grossProfit, opex, opexByName, restock, gst, pst, netIncome, writeOff, gstITC };
 }
 function storeBalances(filter) {
   const D = BCCWE;
@@ -201,10 +237,22 @@ function storeBalances(filter) {
     ar += s.owed || 0;                                 // "on account" register sales are receivables
     taxPay += (s.gst || 0) + (s.pst || 0);
   });
+  (D.expenses || []).forEach((e) => {
+    if (!storeMatch(e, filter)) return;
+    // GST paid on expenses is an input tax credit → reduces net tax payable,
+    // matching the 2100 posting in liveAccountBalances so the Balance Sheet and
+    // Chart of Accounts agree. (BC PST paid is not recoverable.)
+    const m = (D.TAX && D.TAX.modes && D.TAX.modes[e.tax]) || null;
+    if (m) taxPay -= (e.amount || 0) * (m.gst || 0);
+  });
   // Inventory is held company-wide, so it's only shown in the combined view.
   const inventory = filter === "all" || !filter
     ? (D.inventory || []).reduce((s, it) => s + (it.stock || 0) * (it.cost || 0), 0) : 0;
-  return { cash, ar, inventory, taxPay: Math.max(0, taxPay), deposits };
+  // No Math.max(0,…) clamp: after netting input tax credits a return-heavy or
+  // high-purchase period can legitimately leave a net GST *receivable* (negative
+  // payable). Clamping it to 0 hid that asset and made the Balance Sheet disagree
+  // with the Chart of Accounts (2100/2110).
+  return { cash, ar, inventory, taxPay, deposits };
 }
 function storeLabel(filter) {
   if (!filter || filter === "all") return "All stores (combined)";
@@ -220,6 +268,10 @@ function liveAccountBalances(filter) {
   const bal = {};
   (D.accounts || []).forEach((a) => { bal[a.code] = 0; });
   const add = (code, amt) => { if (!code) return; bal[code] = (bal[code] || 0) + (amt || 0); };
+  // Payment records carry their own Cash-vs-Bank account — index them by invoice
+  // so collected money routes per payment instead of all-by-invoice-payMethod.
+  const payByInv = {};
+  (D.payments || []).forEach((p) => { (payByInv[p.inv] = payByInv[p.inv] || []).push(p); });
   (D.invoices || []).forEach((i) => {
     if (!storeMatch(i, filter)) return;
     if (i.kind === "order") { // deposit only: held as a liability, not revenue
@@ -246,7 +298,19 @@ function liveAccountBalances(filter) {
     add("1300", -cogs);
     add("2100", i.gst || 0); add("2110", i.pst || 0);
     add("1200", Math.max(0, (i.total || 0) - (i.paid || 0)));
-    add(i.payMethod === "Cash" ? "1000" : "1010", i.paid || 0); // refund removed once, in the credit-note loop
+    // Route collected money per payment record (each carries its Cash/Bank acct);
+    // any remainder not covered by payment records falls back to the invoice's
+    // payMethod. Refunds are removed once, in the credit-note loop.
+    let routed = 0;
+    (payByInv[i.no] || []).forEach((p) => {
+      const left = (i.paid || 0) - routed;
+      if (left <= 0) return;
+      const amt = Math.min(p.amount || 0, left);
+      add(p.acct === "1000" ? "1000" : "1010", amt);
+      routed += amt;
+    });
+    const rem = (i.paid || 0) - routed;
+    if (rem > 0.005) add(i.payMethod === "Cash" ? "1000" : "1010", rem);
     add("2200", Math.max(0, (i.paid || 0) - (i.total || 0)));   // overpayment kept as a customer-credit liability
   });
   (D.creditNotes || []).forEach((cn) => {
@@ -256,23 +320,37 @@ function liveAccountBalances(filter) {
     add("4200", cn.restockingFee || 0);
     const rPaid = cn.refundPaid != null ? cn.refundPaid : (cn.refund || 0);
     add(cn.refundAccount || "1010", -rPaid);
+    const cc = cnCosts(cn);
+    add("5000", cc.exchangeOut - cc.restock - cc.defect); // reverse COGS on goods back; add for replacements out
+    add("5100", cc.defect);                               // defective cost reclassified to loss
   });
   (D.expenses || []).forEach((e) => {
     if (!storeMatch(e, filter)) return;
-    add(e.acct || "6900", e.amount || 0);
-    add(e.paidFrom || "1010", -(e.amount || 0));
+    // Amounts are pre-tax: PST folds into the expense cost (not recoverable in
+    // BC); GST paid is an input tax credit that reduces GST Payable; the full
+    // tax-inclusive amount leaves the bank/cash account. (Matches seed JE-2049.)
+    const m = (D.TAX && D.TAX.modes && D.TAX.modes[e.tax]) || null;
+    const gstPaid = m ? (e.amount || 0) * (m.gst || 0) : 0;
+    const pstPaid = m ? (e.amount || 0) * (m.pst || 0) : 0;
+    add(e.acct || "6900", (e.amount || 0) + pstPaid);
+    add("2100", -gstPaid);
+    add(e.paidFrom || "1010", -((e.amount || 0) + gstPaid + pstPaid));
   });
   (D.cashSales || []).forEach((s) => {
     if (!storeMatch(s, filter)) return;
     const collected = s.paid != null ? s.paid : (s.total || 0);
-    add(s.method === "Cash" ? "1000" : "1010", collected);
+    // Register methods are display labels ("Cash refund", "Debit · partial (…)")
+    // — prefix-match Cash so cash refunds don't land in the bank account.
+    add(String(s.method || "").toLowerCase().indexOf("cash") === 0 ? "1000" : "1010", collected);
     add("1200", s.owed || 0); // "on account" register sales are receivables, not cash
     if (s.subtotal != null) {
       add("4000", s.subtotal); add("2100", s.gst || 0); add("2110", s.pst || 0); add("4200", s.restockingFee || 0);
     } else {
       add("4000", s.total || 0);
     }
-    if (s.cogs) { add("5000", s.cogs); add("1300", -s.cogs); }
+    const sCogs = (s.cogs || 0) - (s.defLoss || 0); // defective units reclassify from COGS…
+    if (sCogs) { add("5000", sCogs); add("1300", -sCogs); }
+    if (s.defLoss) add("5100", s.defLoss);          // …to Loss on Defective Goods
   });
   // Inventory is held company-wide → only shown in the combined view.
   bal["1300"] = (filter === "all" || !filter)
@@ -368,7 +446,8 @@ function PLReport({ store }) {
       <StatementRow label="Total revenue" value={fmt(f.revenue + f.restock)} bold />
       <div className="stmt-sec">Cost of goods sold</div>
       <StatementRow label="Cost of goods sold" value={fmt(f.cogs)} indent />
-      <StatementRow label="Gross profit" value={fmt(f.grossProfit + f.restock)} bold />
+      {f.writeOff > 0.005 && <StatementRow label="Inventory written off (defective returns)" value={fmt(f.writeOff)} indent />}
+      <StatementRow label="Gross profit" value={fmt(f.grossProfit + f.restock - f.writeOff)} bold />
       <div className="stmt-sec">Operating expenses</div>
       {cats.length ? cats.map((k) => <StatementRow key={k} label={k} value={fmt(f.opexByName[k])} indent />)
         : <StatementRow label="No expenses recorded" value={fmt(0)} indent />}
@@ -445,11 +524,14 @@ function TaxReport({ store }) {
   return (
     <div className="statement">
       <h3 className="stmt-title">GST / PST Remittance — {storeLabel(sf)}</h3>
-      <div className="stmt-sec">Net tax collected (sales less returns)</div>
-      <StatementRow label="GST collected" value={fmt(f.gst)} indent />
-      <StatementRow label="PST collected" value={fmt(f.pst)} indent />
-      <StatementRow label="Total remittance due" value={fmt(f.gst + f.pst)} total />
-      <div className="stmt-note">Calculated from this store's invoices and returns. Cash store invoices carry no tax.</div>
+      <div className="stmt-sec">GST</div>
+      <StatementRow label="GST collected on sales (net of returns)" value={fmt(f.gst)} indent />
+      {f.gstITC > 0.005 && <StatementRow label="Less: GST paid on expenses (input tax credits)" value={"−" + fmt(f.gstITC)} indent neg />}
+      <StatementRow label="Net GST due" value={fmt(f.gst - f.gstITC)} bold />
+      <div className="stmt-sec">PST</div>
+      <StatementRow label="PST collected (no input credits in BC)" value={fmt(f.pst)} indent />
+      <StatementRow label="Total remittance due" value={fmt(f.gst - f.gstITC + f.pst)} total />
+      <div className="stmt-note">GST due nets input tax credits on expenses; BC PST paid on purchases is not recoverable and is included in expense cost. Purchase orders are not yet posted here (Phase 8).</div>
     </div>
   );
 }

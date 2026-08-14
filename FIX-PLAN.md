@@ -163,21 +163,26 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
 - [ ] **COGS fabricated from *current* catalogue for line-less invoices** and drifts when costs change.
       `screens-detail.jsx:6-18` consumed at `screens-c.jsx:154,227` → store cost-at-sale on lines/`itemSales`;
       take COGS from the record or its journal, never a heuristic.
-- [ ] **Returns reduce revenue but never reverse COGS** (restocked goods). `screens-c.jsx:156-161` → subtract
-      restocked cost in both `storeFinance` and `liveAccountBalances`.
-- [ ] **Write-off losses (`defectiveProducts`) reach no report.** → route through `expenses` or sum
-      `costLoss` into 5100/5110.
+- [x] **Returns reduce revenue but never reverse COGS** (restocked goods). `screens-c.jsx` → new `cnCosts()` helper;
+      restocked cost reverses COGS, defective cost reclassifies to 5100, exchange replacements add COGS, in both
+      `storeFinance` and `liveAccountBalances`. *(done — verified by harness: sell@60 then restock-return → COGS 0.)*
+- [x] **Write-off losses (`defectiveProducts`) reach no report.** → register writer now stores `defLoss`; engine
+      reclassifies it from COGS into a P&L "Inventory written off" line and account 5100. The Expenses-screen
+      write-off path already posts through `expenses` (5100/5110), so no double count. *(done)*
 - [x] **Overpayment "kept as credit" becomes phantom equity.** `screens-c.jsx:186,243` → engine now posts the
       excess (`paid − total`) to Customer Deposits (2200) as a liability. *(engine done; the invoice-generator
       `credit` field that also needs persisting is a Phase 6 item.)*
 - [x] **P&L revenue ignores invoice discount + charges; disagrees with Trial Balance.** `screens-c.jsx:152`
       → `revenue += total − gst − pst` (net-of-tax consideration). *(done)*
-- [ ] **Tax report has no input tax credits → GST remittance overstated.** `screens-c.jsx:436-440` → subtract
-      expense/purchase GST as ITCs; post to 2100.
-- [ ] **Cash-vs-bank routing** posts all of `inv.paid` by one method and misreads register labels.
-      `screens-c.jsx:244,261` → route per-payment from `payments[].acct`.
-- [ ] **Seed the missing accounts `4200` (Restocking Fee Income) and `4900` (Sales Discounts)** the register
-      and discount postings reference. `data.js:85-114`.
+- [x] **Tax report has no input tax credits → GST remittance overstated.** `screens-c.jsx` → GST Remittance report
+      now nets GST input tax credits on expenses; PST paid folds into expense cost (not recoverable in BC). Expense
+      GST posts to 2100. *(done — PO purchase ITCs come with Phase 8.)*
+- [x] **Cash-vs-bank routing** posted all of `inv.paid` by one method and misread register labels.
+      `screens-c.jsx` → collected money now routes per `payments[].acct`; register cash matched by label prefix so
+      cash refunds don't land in the bank account. *(done)*
+- [x] **Seed the missing accounts `4200` (Restocking Fee Income) and `4900` (Sales Discounts)** the register
+      and discount postings reference. `data.js` → added to the seed **and** a load-time top-up migrates existing DBs
+      (since "DB always wins"). *(done)*
 - [ ] **Make the Balance-Sheet / Trial-Balance check real.** The `3900` plug + `assets = liabilities + (assets−liabilities)`
       identity hide every error. `screens-c.jsx:279-280,376,392`. **Resequenced to AFTER Phase 8:** the check can only
       be honest once purchases/receiving post to Inventory (1300). Today 1300 is a stock snapshot disconnected from the

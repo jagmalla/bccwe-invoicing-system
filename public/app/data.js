@@ -97,6 +97,8 @@
     { code: "4000", name: "Sales Revenue — Retail", type: "Revenue", balance: 96420.0 },
     { code: "4010", name: "Sales Revenue — Wholesale", type: "Revenue", balance: 61350.0 },
     { code: "4100", name: "Service & Repair Revenue", type: "Revenue", balance: 28940.0 },
+    { code: "4200", name: "Restocking Fee Income", type: "Revenue", balance: 0 },
+    { code: "4900", name: "Sales Discounts", type: "Revenue", balance: 0 },
     { code: "5000", name: "Cost of Goods Sold", type: "Expense", balance: 98610.0 },
     { code: "5100", name: "Loss on Defective Goods", type: "Expense", balance: 1010.0 },
     { code: "5110", name: "Loss on Lost / Missing Stock", type: "Expense", balance: 420.0 },
@@ -1330,6 +1332,16 @@
     if (st.status === 200 && st.json) {
       if (!st.json.empty) {
         Object.keys(st.json).forEach(function (key) { window.BCCWE[key] = st.json[key]; });
+        // Older DB snapshots predate some ledger accounts, and "DB always wins"
+        // would hide them forever. Top up any that are missing so postings to
+        // these codes show in the chart of accounts / trial balance.
+        window.BCCWE.accounts = window.BCCWE.accounts || [];
+        [
+          { code: "4200", name: "Restocking Fee Income", type: "Revenue", balance: 0 },
+          { code: "4900", name: "Sales Discounts", type: "Revenue", balance: 0 },
+        ].forEach(function (a) {
+          if (!window.BCCWE.accounts.some(function (x) { return x.code === a.code; })) window.BCCWE.accounts.push(a);
+        });
       } else {
         // First run after a fresh start — seed a BLANK dataset (setup kept).
         var seed = freshDefaults();
