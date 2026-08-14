@@ -1,0 +1,272 @@
+/* ============================================================
+   BCCWE — App shell, navigation, router, mount
+   ============================================================ */
+const NAV = [
+  { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+  { id: "pos", label: "POS", icon: "cart" },
+  { id: "neworder", label: "New Order", icon: "order" },
+  { id: "invoice", label: "Invoice Generator", icon: "invoice" },
+  { id: "return", label: "Return", icon: "history" },
+  { id: "exchange", label: "Exchange", icon: "history" },
+  { id: "history", label: "Invoice History", icon: "history" },
+  { id: "orders", label: "Client Orders", icon: "order" },
+  { id: "people", label: "Clients & Suppliers", icon: "people" },
+  { id: "inventory", label: "Inventory", icon: "box" },
+  { id: "sales", label: "Sales", icon: "cart" },
+  { id: "expenses", label: "Expenses", icon: "receipt" },
+  { id: "accounting", label: "Accounting", icon: "ledger" },
+  { id: "unpaid", label: "Unpaid Invoices", icon: "alert" },
+  { id: "reports", label: "Reports", icon: "report" },
+  { id: "mail", label: "Sent Mail", icon: "mail" },
+  { id: "logs", label: "Activity Logs", icon: "history" },
+  { id: "stores", label: "Stores", icon: "store" },
+  { id: "settings", label: "Settings", icon: "settings" },
+];
+const GROUPS = [
+  { title: "Operate", ids: ["dashboard", "pos", "history", "orders", "people"] },
+  { title: "Sales", ids: ["invoice", "return", "exchange"] },
+  { title: "Trade", ids: ["inventory", "expenses"] },
+  { title: "Finance", ids: ["accounting", "unpaid", "reports"] },
+  { title: "Admin", ids: ["mail", "logs", "stores", "settings"] },
+];
+
+// Whether the signed-in user's role may see a given nav module. Admins/owners
+// see everything; other roles only see modules their role grants a permission in.
+function navAllowed(id) {
+  if (window.STORES && window.STORES.isAdmin()) return true;
+  const sess = window.__session || {};
+  const roles = BCCWE.roles || [];
+  const role = roles.find((r) => r.id === sess.roleId) || roles.find((r) => r.name === sess.role);
+  const perms = role && role.perms;
+  if (!perms) return true; // no role info on record — don't lock the user out
+  if (id === "stores" || id === "mail" || id === "logs") return false; // admin-only utilities
+  if (id === "pos") return !!(perms.sales && perms.sales.add);          // POS = can add a sale
+  if (id === "neworder") return !!(perms.orders && perms.orders.add);   // New Order = can add an order
+  if (id === "return" || id === "exchange") return !!(perms.sales && (perms.sales.add || perms.sales.ret_all || perms.sales.ret_own));
+  const mp = perms[id];
+  if (!mp) return true; // module not in the permission model — allow
+  return Object.keys(mp).some((k) => mp[k]);
+}
+
+// Catches render errors in any screen so one failing view never blanks the
+// whole app. Keyed by route, so navigating elsewhere automatically recovers.
+class ScreenErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err: err }; }
+  componentDidCatch(err, info) { try { console.error("Screen error:", err, info); } catch (e) {} }
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="card" style={{ padding: 24, maxWidth: 640, margin: "20px auto" }}>
+          <h3 style={{ marginBottom: 8 }}>Something went wrong on this screen</h3>
+          <p className="muted" style={{ marginBottom: 12 }}>The rest of the app is fine — use the menu to go elsewhere, or reload.</p>
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, color: "#b3322d", background: "#fbe7e6", padding: 10, borderRadius: 8, marginBottom: 14 }}>{String(this.state.err && (this.state.err.message || this.state.err))}</pre>
+          <button className="btn btn-primary" onClick={() => location.reload()}>Reload app</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function buildNotifications() {
+  const D = BCCWE;
+  const today = D.today;
+  const out = [];
+  (D.invoices || []).forEach((i) => {
+    const bal = +(i.total - (i.paid || 0)).toFixed(2);
+    if (bal > 0.005 && i.due && i.due < today) {
+      out.push({ id: "ov-" + i.no, icon: "alert", tone: "red", title: "Invoice " + i.no + " is overdue",
+        detail: clientName(i.clientId) + " · " + fmt(bal) + " due " + shortDate(i.due), route: "invoiceview/" + i.no, ts: i.due });
+    }
+  });
+  (D.mailLog || []).filter((m) => m.status === "Bounced").forEach((m) => {
+    out.push({ id: "bn-" + m.id, icon: "mail", tone: "red", title: "Email bounced",
+      detail: (m.subject || "Email") + " · " + ((m.to && m.to[0]) || ""), route: "mail", ts: m.ts });
+  });
+  (D.inventory || []).filter((it) => it.kind !== "Service" && (it.alert || 0) > 0 && it.stock <= it.alert).forEach((it) => {
+    out.push({ id: "ls-" + it.code, icon: "box", tone: "amber", title: "Low stock — " + it.name,
+      detail: it.stock + " left · reorder at " + it.alert, route: "inventory", ts: "" });
+  });
+  const order = { red: 0, amber: 1, slate: 2 };
+  return out.sort((a, b) => (order[a.tone] - order[b.tone]) || String(b.ts).localeCompare(String(a.ts)));
+}
+
+function NotificationsBell({ go }) {
+  const [open, setOpen] = useState(false);
+  const [read, setRead] = useState(false);
+  const ref = useRef(null);
+  const items = useMemo(() => buildNotifications(), [open]);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const k = (e) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("mousedown", h);
+    window.addEventListener("keydown", k);
+    return () => { window.removeEventListener("mousedown", h); window.removeEventListener("keydown", k); };
+  }, [open]);
+  function toggle() { setOpen((o) => { const n = !o; if (n) setRead(true); return n; }); }
+  const unread = !read && items.length > 0;
+  return (
+    <div className="notif" ref={ref}>
+      <button className="icon-btn bell" onClick={toggle} aria-label="Notifications">
+        <Icon name="bell" size={18} />
+        {unread && <i className="bell-dot" />}
+      </button>
+      {open && (
+        <div className="notif-panel">
+          <div className="notif-head">
+            <strong>Notifications</strong>
+            <span>{items.length ? items.length + " need attention" : "All clear"}</span>
+          </div>
+          <div className="notif-list">
+            {items.length ? items.map((n) => (
+              <button key={n.id} className="notif-item" onClick={() => { go(n.route); setOpen(false); }}>
+                <span className={"notif-ico tone-" + n.tone}><Icon name={n.icon} size={15} /></span>
+                <span className="notif-body">
+                  <strong>{n.title}</strong>
+                  <span>{n.detail}</span>
+                </span>
+              </button>
+            )) : (
+              <div className="notif-empty"><Icon name="check" size={22} /><span>Nothing needs your attention</span></div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [route, setRoute] = useState(() => location.hash.slice(1) || "dashboard");
+  const [toast, setToast] = useState(null);
+  const [navOpen, setNavOpen] = useState(false);
+  const [store, setStore] = useState(() => (window.STORES ? window.STORES.initialFilter() : "all"));
+  const storeOpts = window.STORES ? window.STORES.allowed() : [];
+  const canAll = window.STORES ? window.STORES.canSeeAll() : true;
+  const showStoreSwitcher = storeOpts.length > 1 || (canAll && storeOpts.length >= 1);
+  const go = (r) => { setRoute(r); location.hash = r; setNavOpen(false); window.scrollTo(0, 0); };
+  useEffect(() => {
+    const h = () => setRoute(location.hash.slice(1) || "dashboard");
+    window.addEventListener("hashchange", h);
+    return () => window.removeEventListener("hashchange", h);
+  }, []);
+  const pushToast = (msg) => setToast(msg);
+
+  const [base, param] = route.split("/");
+  const navActive = base === "invoiceview" ? "history" : base === "client" ? "people" : (base === "purchase" || base === "po" || base === "receive") ? "inventory" : base;
+  const active = NAV.find((n) => n.id === navActive) || NAV[0];
+  const crumbLabel = base === "invoiceview" ? "Invoice " + param
+    : base === "client" ? ((BCCWE.clients.find((c) => c.id === param) || {}).name || "Client")
+    : active.label;
+  const crumbIcon = base === "invoiceview" ? "invoice" : base === "client" ? "people" : active.icon;
+
+  return (
+    <div className="app">
+      <div className={"nav-scrim" + (navOpen ? " show" : "")} onClick={() => setNavOpen(false)} />
+      <aside className={"sidebar" + (navOpen ? " open" : "")}>
+        <div className="brand">
+          <div className="brand-logo">BC<span>CWE</span></div>
+          <div className="brand-meta">
+            <strong>BCCWE</strong>
+            <span>Invoicing System</span>
+          </div>
+        </div>
+        <nav className="nav">
+          {GROUPS.map((g) => {
+            const ids = g.ids.filter((id) => navAllowed(id));
+            if (!ids.length) return null;
+            return (
+              <div className="nav-group" key={g.title}>
+                <span className="nav-group-title">{g.title}</span>
+                {ids.map((id) => {
+                  const n = NAV.find((x) => x.id === id);
+                  return (
+                    <button key={id} className={"nav-item" + (route === id ? " on" : "")} onClick={() => go(id)}>
+                      <Icon name={n.icon} size={18} />
+                      <span>{n.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </nav>
+        <div className="sidebar-foot">
+          <div className="tax-pill"><span className="dot" /> BC · GST 5% + PST 7%</div>
+          <div className="ver">CAD · Surrey, BC · v1.0</div>
+        </div>
+      </aside>
+
+      <div className="main">
+        <header className="topbar">
+          <div className="crumbs">
+            <button className="icon-btn menu-btn" onClick={() => setNavOpen((v) => !v)} aria-label="Menu"><Icon name="menu" size={20} /></button>
+            <Icon name={crumbIcon} size={16} />
+            <span>{crumbLabel}</span>
+          </div>
+          <div className="topbar-right">
+            {showStoreSwitcher && (
+              <div className="store-switch" title="Filter everything by store">
+                <Icon name="store" size={15} />
+                <select value={store} onChange={(e) => setStore(e.target.value)}>
+                  {canAll && <option value="all">All stores</option>}
+                  {storeOpts.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            )}
+            <div className="period">Fiscal period · Jun 2026</div>
+            <NotificationsBell go={go} />
+            <AccountMenu />
+          </div>
+        </header>
+
+        <main className="content">
+          <ScreenErrorBoundary key={route}>
+          {NAV.some((n) => n.id === base) && !navAllowed(base) ? (
+            <Card><Empty text="You don't have access to this section." /></Card>
+          ) : <>
+          {base === "dashboard" && <Dashboard go={go} store={store} />}
+          {base === "pos" && <POS pushToast={pushToast} go={go} />}
+          {base === "neworder" && <ClientShop pushToast={pushToast} go={go} />}
+          {base === "invoice" && <InvoiceGenerator key={param || "new"} editNo={param} defaultStore={store !== "all" ? store : ""} onSaved={(no) => go(no ? "invoiceview/" + no : "history")} pushToast={pushToast} />}
+          {base === "history" && <InvoiceHistory go={go} pushToast={pushToast} store={store} />}
+          {base === "orders" && <Orders go={go} pushToast={pushToast} />}
+          {base === "unpaid" && <UnpaidInvoices go={go} store={store} />}
+          {base === "invoiceview" && <InvoiceDetail no={param} go={go} pushToast={pushToast} />}
+          {base === "client" && <ClientAccount id={param} go={go} pushToast={pushToast} />}
+          {base === "people" && <People go={go} pushToast={pushToast} />}
+          {base === "inventory" && <Inventory go={go} pushToast={pushToast} />}
+          {base === "purchase" && <PurchasePage go={go} pushToast={pushToast} store={store} />}
+          {base === "po" && <OrderDetailPage po={param} go={go} pushToast={pushToast} />}
+          {base === "receive" && <ReceiveOrderPage po={param} go={go} pushToast={pushToast} />}
+          {base === "sales" && <Sales go={go} pushToast={pushToast} store={store} />}
+          {base === "return" && <QuickSale lockKind="Return" store={store} pushToast={pushToast} onRecorded={() => {}} />}
+          {base === "exchange" && <QuickSale lockKind="Exchange" store={store} pushToast={pushToast} onRecorded={() => {}} />}
+          {base === "expenses" && <Expenses pushToast={pushToast} store={store} />}
+          {base === "accounting" && <Accounting store={store} />}
+          {base === "reports" && <Reports store={store} />}
+          {base === "mail" && <SentMail go={go} pushToast={pushToast} />}
+          {base === "logs" && <AuditLog pushToast={pushToast} />}
+          {base === "stores" && <Stores pushToast={pushToast} />}
+          {base === "settings" && <Settings pushToast={pushToast} />}
+          </>}
+          </ScreenErrorBoundary>
+        </main>
+      </div>
+
+      {toast && <Toast msg={toast} onDone={() => setToast(null)} />}
+    </div>
+  );
+}
+
+// Gate the whole app behind login. data.js has already validated any saved
+// token and set window.__authed / window.__session during boot.
+function Root() {
+  if (!window.__authed) return <LoginScreen />;
+  if (window.__session && window.__session.mustChange) return <ForceChange />;
+  return <App />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);

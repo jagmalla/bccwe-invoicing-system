@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Update — BCCWE Invoicing System</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f3f5f8; color: #1c2530; }
+    .wrap { max-width: 640px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #fff; border: 1px solid #e6eaf0; border-radius: 14px; padding: 28px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+    .logo { width: 44px; height: 44px; background: #ea580c; color: #fff; display: grid; place-items: center; border-radius: 10px; font-weight: 800; font-size: 20px; }
+    h1 { font-size: 20px; margin: 16px 0 4px; }
+    p.sub { color: #5a6877; margin: 0 0 20px; font-size: 14px; }
+    label { display: block; font-weight: 600; font-size: 13px; margin: 16px 0 6px; }
+    input[type="password"], input[type="file"] { width: 100%; padding: 10px 12px; border: 1px solid #d4dae2; border-radius: 8px; font-size: 14px; background: #fff; }
+    .drop { border: 2px dashed #c4ccd6; border-radius: 10px; padding: 22px; text-align: center; color: #5a6877; font-size: 14px; margin-top: 6px; }
+    .filelist { margin: 14px 0 0; padding: 0; list-style: none; }
+    .filelist li { display: flex; justify-content: space-between; padding: 8px 12px; background: #f7f9fb; border: 1px solid #eef1f5; border-radius: 8px; margin-bottom: 6px; font-size: 13px; }
+    .filelist li.bad { background: #fdeeee; border-color: #f3caca; color: #a32626; }
+    button { margin-top: 22px; width: 100%; padding: 13px; background: #ea580c; color: #fff; border: none; border-radius: 9px; font-size: 15px; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .msg { margin-top: 18px; padding: 14px; border-radius: 9px; font-size: 14px; display: none; }
+    .msg.ok { background: #e6f6ef; color: #c2410c; border: 1px solid #b9e4d2; display: block; }
+    .msg.err { background: #fdeeee; color: #a32626; border: 1px solid #f3caca; display: block; }
+    .note { font-size: 12px; color: #8593a3; margin-top: 18px; line-height: 1.5; }
+    a { color: #ea580c; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="logo">B</div>
+      <h1>Update Your Website</h1>
+      <p class="sub">Upload new design files exported from Claude Design. They go live after you refresh the main site.</p>
+
+      <label for="pwd">Admin password</label>
+      <input type="password" id="pwd" placeholder="The update password you set" autocomplete="current-password" />
+
+      <label for="files">New design files</label>
+      <input type="file" id="files" multiple accept=".jsx,.css,.js" />
+      <div class="drop">Allowed: <strong>.jsx</strong>, <strong>.css</strong>, <strong>.js</strong> &nbsp;•&nbsp; <code>data.js</code> is protected and cannot be replaced.</div>
+
+      <ul class="filelist" id="filelist"></ul>
+
+      <button id="go" disabled>Upload &amp; Update</button>
+
+      <div class="msg" id="msg"></div>
+
+      <p class="note">
+        A backup of every replaced file is saved automatically on the server.
+        After a successful upload, open the main site and press <strong>Ctrl+Shift+R</strong>
+        (or <strong>Cmd+Shift+R</strong> on Mac) to see your changes. Your saved
+        data (invoices, inventory, clients) is never affected by an update.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    var filesInput = document.getElementById("files");
+    var fileList = document.getElementById("filelist");
+    var goBtn = document.getElementById("go");
+    var msg = document.getElementById("msg");
+    var ALLOWED = [".jsx", ".css", ".js"];
+    var picked = [];
+
+    function ext(name) { var i = name.lastIndexOf("."); return i < 0 ? "" : name.slice(i).toLowerCase(); }
+
+    filesInput.addEventListener("change", function () {
+      picked = Array.prototype.slice.call(filesInput.files);
+      renderList();
+    });
+
+    function renderList() {
+      fileList.innerHTML = "";
+      var anyValid = false;
+      picked.forEach(function (f) {
+        var li = document.createElement("li");
+        var ok = ALLOWED.indexOf(ext(f.name)) !== -1 && f.name !== "data.js";
+        if (ok) anyValid = true;
+        li.className = ok ? "" : "bad";
+        li.innerHTML = "<span>" + f.name + "</span><span>" + (ok ? Math.ceil(f.size / 1024) + " KB" : "not allowed") + "</span>";
+        fileList.appendChild(li);
+      });
+      goBtn.disabled = !anyValid;
+    }
+
+    function readFile(file) {
+      return new Promise(function (resolve, reject) {
+        var r = new FileReader();
+        r.onload = function () { resolve({ name: file.name, content: r.result }); };
+        r.onerror = reject;
+        r.readAsText(file);
+      });
+    }
+
+    goBtn.addEventListener("click", function () {
+      msg.className = "msg"; msg.textContent = "";
+      var pwd = document.getElementById("pwd").value;
+      if (!pwd) { showErr("Please enter the admin password."); return; }
+      var valid = picked.filter(function (f) { return ALLOWED.indexOf(ext(f.name)) !== -1 && f.name !== "data.js"; });
+      if (valid.length === 0) { showErr("No allowed files selected."); return; }
+
+      goBtn.disabled = true; goBtn.textContent = "Uploading…";
+      Promise.all(valid.map(readFile)).then(function (payload) {
+        return fetch("/api/admin/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pwd, files: payload })
+        });
+      }).then(function (res) {
+        return res.json().then(function (data) { return { status: res.status, data: data }; });
+      }).then(function (r) {
+        goBtn.disabled = false; goBtn.textContent = "Upload & Update";
+        if (r.status === 200 && r.data.ok) {
+          showOk("Updated " + r.data.updated.length + " file(s): " + r.data.updated.join(", ") +
+            ". Now open your site and hard-refresh (Ctrl/Cmd+Shift+R) to see the changes.");
+        } else {
+          showErr(r.data.error || "Upload failed.");
+        }
+      }).catch(function () {
+        goBtn.disabled = false; goBtn.textContent = "Upload & Update";
+        showErr("Network error — could not reach the server.");
+      });
+    });
+
+    function showOk(t) { msg.className = "msg ok"; msg.textContent = t; }
+    function showErr(t) { msg.className = "msg err"; msg.textContent = t; }
+  </script>
+</body>
+</html>

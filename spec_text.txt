@@ -1,0 +1,328 @@
+BCCWE INVOICING SYSTEM
+Complete Build & Operating Specification
+Invoicing  •  Inventory  •  Double-Entry Accounting
+
+Stack: PHP 8.1.34  +  MySQL/MariaDB (InnoDB)  +  A2 Shared Hosting
+Currency: CAD   |   Tax: BC GST 5% + PST 7%   |   Region: Surrey, BC, Canada
+
+Table of Contents
+
+1. System Overview
+The BCCWE Invoicing System is a web-based application for managing invoicing, inventory, sales, multiple staff users, and a full double-entry accounting ledger. It is built for a phone and laptop repair and pre-owned device retail business operating in Surrey, British Columbia, Canada.
+All amounts are in Canadian Dollars (CAD). Sales tax follows British Columbia rules, with a flexible per-transaction tax choice. The system runs on standard A2 shared hosting using PHP and MySQL, deployable entirely through cPanel with no command-line access required.
+Technology Stack
+
+Layer
+ | Technology
+ | 
+Server language
+ | PHP 8.1.34
+ | 
+Database
+ | MySQL / MariaDB, InnoDB engine (transactions + foreign keys)
+ | 
+Frontend
+ | HTML, CSS, JavaScript (Bootstrap or Tailwind), responsive
+ | 
+PDF engine
+ | Dompdf or mPDF (pure PHP, shared-hosting friendly)
+ | 
+Email
+ | PHPMailer, using SMTP settings entered in the admin panel
+ | 
+Authentication
+ | PHP sessions, password_hash / password_verify
+ | 
+Hosting/Deploy
+ | A2 cPanel: File Manager / FTP upload, phpMyAdmin import
+ | 
+Scheduled jobs
+ | cPanel Cron (overdue flags, stock alerts, backups)
+ | 
+Shared-Hosting Design Rules
+No long-running processes, no Node server, no Redis — everything runs as standard PHP request/response.
+Concurrency is handled at the database level: InnoDB transactions with row locking (SELECT ... FOR UPDATE) for critical sections.
+Reports are paginated and queries indexed to stay within hosting memory and execution-time limits.
+cPanel Cron handles overdue-invoice flagging, low-stock email alerts, and daily database backups.
+
+2. Users, Roles & First Login
+2.1 Default Administrator Account
+The system ships with one pre-created administrator account:
+
+Field
+ | Default Value
+ | 
+User ID
+ | admin
+ | 
+Password
+ | password
+ | 
+2.2 First-Login Security Flow
+On the very first successful login with the default credentials, the system forces a one-time security setup before any other screen can be used:
+The admin is redirected to a mandatory "First-Time Setup" screen.
+The admin may change the User ID once. This is the only time the User ID can be changed; afterwards it is permanent and the field is locked.
+The admin must change the password from the default to a new password (cannot keep "password").
+After saving, a flag (must_change = 0, userid_locked = 1) is stored so this screen never appears again for that user.
+After first-time setup, the password can still be changed at any time from the user profile. The User ID can never be changed again.
+2.3 Roles & Permissions
+
+Role
+ | Access
+ | 
+Admin
+ | Full access to every module, all settings, user management, accounting, and email configuration.
+ | 
+Team Member
+ | Sales entry and invoicing with limited, configurable permissions. No access to accounting setup or financial reports unless granted.
+ | 
+Accountant
+ | Full access to financials: chart of accounts, journal entries, ledger, and all reports. Read access to sales and expenses.
+ | 
+Each user account is tied to a salesperson identity, used for per-salesperson reporting and commission tracking.
+Passwords are stored hashed (never plaintext) using PHP password_hash().
+Every create, edit, and delete is written to an audit log: user, action, table, record ID, before/after values, and timestamp.
+
+3. Email Configuration
+Email credentials are never hardcoded. An Admin-only Email Settings panel lets you enter and edit SMTP and POP settings through the interface, so you can connect any email account later according to the email ID you choose.
+3.1 Email Settings Panel (Admin)
+
+Group
+ | Fields
+ | 
+SMTP (outgoing)
+ | Host, Port (465/587), Encryption (SSL/TLS/None), Username, Password, From Name, From Email, Reply-To
+ | 
+POP3 (incoming, optional)
+ | Host, Port (995), Encryption, Username, Password
+ | 
+Test
+ | "Send Test Email" button to verify the settings before saving
+ | 
+Multiple sender profiles are supported (e.g., sales@, accounts@). One is marked as the default sender.
+PHPMailer reads the active SMTP profile from the database at send time.
+Stored passwords are encrypted in the database, not plaintext.
+Works with A2 SMTP, Gmail / Google Workspace, Outlook, or any provider, since all values are entered manually.
+3.2 Sending Invoices to Customers
+Each client record can hold one or multiple email addresses.
+When sending an invoice, the system lists all email addresses on that client so you can pick one, several, or all.
+With one click, the invoice PDF is generated and emailed to the selected address(es).
+A default "send to" address can be set per client; additional addresses (e.g., accountant, owner) can be added or ticked at send time.
+Each send is logged (date, recipient, sender profile, success/failure) on the invoice record.
+
+4. Tax Handling
+Every transaction (invoice or sale) must allow the operator to choose one of four tax modes at the time of the transaction:
+
+Tax Mode
+ | Applied Rate
+ | Typical Use
+ | 
+No Tax
+ | 0%
+ | Tax-exempt clients, exports, certain wholesale
+ | 
+GST only
+ | 5%
+ | GST-applicable, PST-exempt items
+ | 
+PST only
+ | 7%
+ | PST-applicable, GST-exempt scenarios
+ | 
+GST + PST
+ | 5% + 7% = 12%
+ | Standard BC retail sale
+ | 
+The chosen mode is stored on the invoice/sale and drives the journal posting to the correct tax liability accounts.
+GST and PST are tracked as separate liability accounts for remittance reporting.
+A per-client or per-item tax-exempt flag can pre-select "No Tax" automatically, while still allowing manual override per transaction.
+Tax rates are stored in settings so they can be updated if BC rates ever change.
+
+5. Core Modules
+5.1 Invoice Generator
+Company header/logo, invoice number (auto-increment with manual override, allocated via a locked transaction), and editable date.
+Client details, line items (pulled from inventory or entered manually), quantity, unit price, discounts, subtotal, tax (per Section 4), and total.
+Email the invoice (PDF attached) to one or more client email addresses with one click (Section 3.2).
+Download the invoice as a PDF at any time.
+Partial payments: record amount received, payment method, and a running balance.
+Status tracking: Paid, Partially Paid, Unpaid, Overdue.
+Each invoice automatically posts balanced journal entries to the accounting engine.
+5.2 Invoice History
+All invoices in a searchable, filterable, paginated table (client, date range, status, salesperson).
+Import invoices via CSV/Excel bulk upload.
+View, edit, re-send, or download any invoice.
+5.3 People — Suppliers & Clients
+Suppliers: add individually or import. Fields: name, contact, address, payment terms.
+Clients: add or import. Client type = Wholesale or Retail (drives pricing tier and default tax behavior).
+Each client holds one or multiple email addresses and an outstanding receivable balance.
+5.4 Inventory Management
+Import inventory via CSV/Excel.
+Purchase entry fields: Item Code, Purchase Quantity, Bonus Quantity, Cost Price, Sales Price, Supplier, Stock Alert (low-stock threshold).
+Order tracking: Placed Orders (with Tracking No.) and Order Received status; receiving auto-updates stock.
+Stock auto-decrements on sale and auto-increments on sales return or order receipt.
+Inventory is valued as an asset; cost of goods sold posts to the ledger on each sale.
+Bonus Quantity adds to stock but not to cost basis, lowering the effective cost-per-unit used in COGS and margin calculations.
+5.5 Sales
+Sales without invoice
+Client type, Sales Exchange, Sales Return, Payment Method.
+Sales with invoice
+Client type, editable date, editable invoice number, invoice email, partial payment received, payment method.
+Every sale automatically posts the correct journal entries. Returns and exchanges reverse inventory and post reversing entries.
+5.6 Expenses
+Record expenses: category (mapped to an expense account), date, amount, payment method, optional receipt upload, and optional client/department tag.
+Each expense automatically posts journal entries.
+
+6. Double-Entry Accounting Engine
+A complete double-entry bookkeeping core underpins all financials. Every business event creates balanced debit and credit entries, and the books must always balance (total debits = total credits).
+6.1 Chart of Accounts
+
+Category
+ | Example Accounts
+ | 
+Assets
+ | Cash, Bank, Accounts Receivable, Inventory
+ | 
+Liabilities
+ | Accounts Payable, GST Payable, PST Payable
+ | 
+Equity
+ | Owner's Equity, Retained Earnings
+ | 
+Revenue
+ | Sales Revenue (split by client type if desired)
+ | 
+Expenses
+ | Cost of Goods Sold, Operating Expenses (rent, wages, utilities, etc.)
+ | 
+Admin and Accountant can add or edit accounts.
+6.2 Automatic Posting Rules
+
+Event
+ | Debit
+ | Credit
+ | 
+Invoiced sale
+ | Accounts Receivable; COGS
+ | Sales Revenue; GST Payable; PST Payable; Inventory
+ | 
+Cash sale
+ | Cash/Bank; COGS
+ | Sales Revenue; GST/PST Payable; Inventory
+ | 
+Payment received
+ | Cash/Bank
+ | Accounts Receivable
+ | 
+Purchase / stock received
+ | Inventory
+ | Accounts Payable or Cash
+ | 
+Expense
+ | Expense account
+ | Cash/Bank or Accounts Payable
+ | 
+Sales return / exchange
+ | (reverses the original entry)
+ | (reverses the original entry)
+ | 
+6.3 Ledger & Controls
+General Journal (header) and Journal Lines (account, debit, credit) tables; the General Ledger is derived with running balances per account.
+Manual journal entries available to the Accountant for adjusting entries.
+GST and PST tracked as separate liability accounts for remittance.
+Optional period lock so closed periods cannot be edited.
+Per-entry rule enforced: sum of debits = sum of credits.
+
+7. Reporting Module
+All reports can be filtered by yearly, monthly, or a custom date range, and exported to PDF and Excel/CSV.
+
+Report
+ | Description
+ | 
+Income Statement (P&L)
+ | Whole company, by specific client, or by specific salesperson
+ | 
+Balance Sheet
+ | Selected dates, yearly, or monthly (Assets = Liabilities + Equity)
+ | 
+Cash In/Out Flow
+ | Cash movement over the period
+ | 
+Unpaid Invoices
+ | Aging report: 30 / 60 / 90 days outstanding
+ | 
+Income by Client
+ | Revenue grouped by client
+ | 
+Income by Account / Payment Method
+ | Revenue grouped by account or payment method
+ | 
+Trial Balance
+ | Verifies that the books balance
+ | 
+GST/PST Remittance Summary
+ | Tax collected vs. paid for a period
+ | 
+8. Suggested Database Schema
+All tables use the InnoDB engine with foreign keys and indexes on dates, client_id, account_id, and status.
+
+Table
+ | Purpose
+ | 
+users, roles
+ | Accounts, hashed passwords, role assignment, first-login flags
+ | 
+clients
+ | Clients incl. type, pricing tier, multiple emails, A/R balance
+ | 
+client_emails
+ | One-to-many email addresses per client
+ | 
+suppliers
+ | Supplier records and terms
+ | 
+inventory_items
+ | Item code, cost/sales price, stock, alert threshold
+ | 
+purchases, purchase_orders
+ | Purchases, bonus qty, tracking no., received status
+ | 
+invoices, invoice_lines
+ | Invoice headers and line items, tax mode, status
+ | 
+payments
+ | Full and partial payments, method, date
+ | 
+sales, expenses
+ | Non-invoice sales, returns/exchanges, expenses
+ | 
+accounts
+ | Chart of accounts
+ | 
+journal_entries, journal_lines
+ | Double-entry ledger postings
+ | 
+audit_log
+ | User, action, before/after, timestamp
+ | 
+settings
+ | Company info, tax rates, next invoice no., SMTP/POP profiles
+ | 
+9. Deployment on A2 (No Terminal)
+In cPanel, create a MySQL database and a database user; assign the user to the database with all privileges.
+Open phpMyAdmin and import schema.sql to create all tables and seed data (default admin, chart of accounts, tax settings).
+Upload the application files via cPanel File Manager or FTP into public_html (or a subfolder/subdomain).
+Edit config.php with the database name, user, and password; set company name, address, GST/PST numbers, and default tax rates.
+Confirm PHP version is 8.1.34 in cPanel MultiPHP Manager.
+Log in with admin / password, complete the first-time setup (change User ID once and set a new password).
+Open Email Settings and enter your SMTP (and optional POP) details; click Send Test Email to verify.
+In cPanel Cron, schedule daily jobs for overdue-invoice flagging, low-stock alerts, and database backup.
+
+Deliverables Checklist
+Complete PHP/MySQL application covering all modules above.
+schema.sql for phpMyAdmin import, with seed data.
+Role-based login with audit logging and the first-login security flow.
+Full double-entry engine with chart of accounts and ledger.
+Configurable Email Settings panel (SMTP/POP), per-client multiple emails.
+Four-mode tax selection (No Tax / GST / PST / GST+PST) on every transaction.
+Responsive dashboard, PDF invoices/reports, and CSV/Excel import-export.
+Step-by-step, no-terminal setup and daily-use documentation.

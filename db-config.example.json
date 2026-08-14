@@ -1,0 +1,8 @@
+{
+  "host": "localhost",
+  "port": 3306,
+  "user": "PUT_YOUR_DATABASE_USERNAME_HERE",
+  "password": "PUT_YOUR_DATABASE_PASSWORD_HERE",
+  "database": "PUT_YOUR_DATABASE_NAME_HERE",
+  "adminPassword": "PICK_A_STRONG_PASSWORD_FOR_THE_UPDATE_PAGE"
+}
