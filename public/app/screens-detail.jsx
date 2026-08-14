@@ -20,11 +20,22 @@ function deriveLines(inv) {
 function invNetPaid(inv) {
   return +(((inv.paid || 0) - (inv.refunded || 0))).toFixed(2);
 }
+// Returns reduce what an invoice is worth; an exchange that bills more raises it.
+// cn.total is negative for returns, positive for an exchange-up. So the invoice's
+// effective obligation is its total plus the sum of its credit notes.
+function invEffectiveTotal(inv) {
+  const ret = (BCCWE.creditNotes || []).reduce((s, c) => (c.origInv === inv.no ? s + (c.total || 0) : s), 0);
+  return +(((inv.total || 0) + ret)).toFixed(2);
+}
+function invOpenBalance(inv) {
+  return Math.max(0, +((invEffectiveTotal(inv) - invNetPaid(inv))).toFixed(2));
+}
 function invStatus(inv) {
   const net = invNetPaid(inv);
-  const bal = +(inv.total - net).toFixed(2);
-  if (net <= 0.005) return inv.status === "Overdue" ? "Overdue" : "Unpaid";
-  if (net > inv.total + 0.005) return "Overpaid";
+  const eff = invEffectiveTotal(inv);
+  const bal = +(eff - net).toFixed(2);
+  if (net <= 0.005 && eff > 0.005) return inv.status === "Overdue" ? "Overdue" : "Unpaid";
+  if (net > eff + 0.005) return "Overpaid";   // paid more than owed (e.g. a refund is still due to the customer)
   if (bal <= 0.005) return "Paid";
   return "Partially Paid";
 }
@@ -47,14 +58,15 @@ function UnpaidInvoices({ go, store }) {
 
   const unpaidSorts = {
     age_desc: { label: "Age — oldest first", get: (i) => i.age, dir: "desc" },
-    balance_desc: { label: "Balance — high to low", get: (i) => i.total - i.paid, dir: "desc" },
-    balance_asc: { label: "Balance — low to high", get: (i) => i.total - i.paid, dir: "asc" },
+    balance_desc: { label: "Balance — high to low", get: (i) => invOpenBalance(i), dir: "desc" },
+    balance_asc: { label: "Balance — low to high", get: (i) => invOpenBalance(i), dir: "asc" },
     due_asc: { label: "Due date — earliest", get: (i) => new Date(i.due).getTime(), dir: "asc" },
     no_desc: { label: "Invoice # — high to low", get: (i) => parseInt(i.no.replace(/\D/g, "")) || 0, dir: "desc" },
     client_asc: { label: "Client — A to Z", get: (i) => clientName(i.clientId), dir: "asc" },
   };
 
-  const open = D.invoices.filter((i) => invStatus(i) !== "Paid" && i.total - i.paid > 0.005 && (!window.STORES || window.STORES.matches(i, sf)));
+  // Exclude order (deposit) invoices — their unbilled remainder isn't a receivable.
+  const open = D.invoices.filter((i) => i.kind !== "order" && invStatus(i) !== "Paid" && invOpenBalance(i) > 0.005 && (!window.STORES || window.STORES.matches(i, sf)));
   const withAge = open.map((i) => {
     const age = Math.floor((today - new Date(i.due)) / 86400000);
     const b = age <= 0 ? "Current" : age <= 30 ? "1–30" : age <= 60 ? "31–60" : age <= 90 ? "61–90" : "90+";
@@ -64,16 +76,16 @@ function UnpaidInvoices({ go, store }) {
     (bucket === "All" || i.bucket === bucket) &&
     (!q || (i.no + clientName(i.clientId)).toLowerCase().includes(q.toLowerCase()))), sort, unpaidSorts);
 
-  const totalDue = rows.reduce((s, i) => s + (i.total - i.paid), 0);
-  const overdueDue = withAge.filter((i) => i.age > 0).reduce((s, i) => s + (i.total - i.paid), 0);
+  const totalDue = rows.reduce((s, i) => s + invOpenBalance(i), 0);
+  const overdueDue = withAge.filter((i) => i.age > 0).reduce((s, i) => s + invOpenBalance(i), 0);
 
   const buckets = ["Current", "1–30", "31–60", "61–90", "90+"];
   const bucketTotals = {};
-  buckets.forEach((b) => { bucketTotals[b] = withAge.filter((i) => i.bucket === b).reduce((s, i) => s + (i.total - i.paid), 0); });
+  buckets.forEach((b) => { bucketTotals[b] = withAge.filter((i) => i.bucket === b).reduce((s, i) => s + invOpenBalance(i), 0); });
 
   return (
     <div>
-      <PageHead title="Unpaid Invoices" sub={open.length + " open · " + fmt(withAge.reduce((s, i) => s + (i.total - i.paid), 0)) + " receivable · " + fmt(overdueDue) + " overdue"}
+      <PageHead title="Unpaid Invoices" sub={open.length + " open · " + fmt(withAge.reduce((s, i) => s + invOpenBalance(i), 0)) + " receivable · " + fmt(overdueDue) + " overdue"}
         actions={<>
           <Btn variant="ghost" icon="download">Export</Btn>
           <Btn variant="primary" icon="plus" onClick={() => go("invoice")}>New invoice</Btn>
@@ -109,7 +121,7 @@ function UnpaidInvoices({ go, store }) {
                 <td className={i.age > 0 ? "neg mono" : "muted mono"}>{i.age > 0 ? i.age + "d" : "—"}</td>
                 <td className="r mono">{fmt(i.total)}</td>
                 <td className="r mono muted">{i.paid > 0 ? fmt(i.paid) : "—"}</td>
-                <td className="r mono strong">{fmt(i.total - i.paid)}</td>
+                <td className="r mono strong">{fmt(invOpenBalance(i))}</td>
                 <td><Badge tone={statusTone(invStatus(i))} dot>{invStatus(i)}</Badge></td>
               </tr>
             ))}
@@ -141,8 +153,9 @@ function InvoiceDetail({ no, go, pushToast }) {
   const status = invStatus(inv);
   const refunded = inv.refunded || 0;
   const netPaid = invNetPaid(inv);
-  const bal = Math.max(0, +(inv.total - netPaid).toFixed(2));
-  const creditKept = netPaid > inv.total + 0.005 ? +(netPaid - inv.total).toFixed(2) : 0;
+  const effTotal = invEffectiveTotal(inv);
+  const bal = Math.max(0, +(effTotal - netPaid).toFixed(2));
+  const creditKept = netPaid > effTotal + 0.005 ? +(netPaid - effTotal).toFixed(2) : 0;
   const pays = invPayments(inv);
   const je = D.journal.find((j) => j.memo.includes(inv.no));
   // recent purchases of an item by this invoice's client (for price suggestions)
@@ -173,8 +186,12 @@ function InvoiceDetail({ no, go, pushToast }) {
     if (mode === "") pushToast && pushToast("This client has no phone number on file");
     else if (mode === "api") pushToast && pushToast("Sending to WhatsApp…");
   }
-  function recordReturn(p) {
+  async function recordReturn(p) {
     const isReturn = p.mode === "Return";
+    // Snapshot everything this touches so a failed save rolls back cleanly.
+    const snapKeys = ["creditNotes", "inventory", "defectiveProducts", "accounts", "invoices", "payments"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
     const cn = {
       no: (isReturn ? "CN-" : "EX-") + Date.now().toString(36).toUpperCase().slice(-6),
       type: p.mode, retDisp: p.retDisp, clientId: inv.clientId, date: D.today,
@@ -183,6 +200,7 @@ function InvoiceDetail({ no, go, pushToast }) {
       restockingFee: p.restockingFee || 0,
       refundWithTax: p.refundWithTax !== false, refundPaid: p.refundPaid || 0, refundAccount: p.refundAccount || "",
       refundStatus: p.refundStatus || "n/a",
+      collect: p.collect || 0, collectAccount: p.collectAccount || "",
       status: isReturn ? (p.refundStatus === "unpaid" ? "Refund due" : p.refundStatus === "partial" ? "Partially refunded" : "Refunded") : "Exchanged",
       items: p.items, exchangeItems: p.exchangeItems || [],
     };
@@ -202,10 +220,24 @@ function InvoiceDetail({ no, go, pushToast }) {
       if (!acct) { acct = { code: "4200", name: "Restocking Fee Income", type: "Revenue", balance: 0 }; D.accounts.push(acct); }
       acct.balance = +((acct.balance || 0) + p.restockingFee).toFixed(2);
     }
-    if (isReturn) inv.refunded = +(((inv.refunded || 0) + (p.refund || 0))).toFixed(2);
+    // Only the refund actually PAID OUT reduces net paid (drives status/balance;
+    // the ledger's cash comes from the credit note). Applies to exchange-down
+    // refunds too, not only returns. An unpaid/partial refund is not fully removed.
+    if ((p.refundPaid || 0) > 0.005) inv.refunded = +(((inv.refunded || 0) + p.refundPaid)).toFixed(2);
+    // Exchange that bills MORE: record the money collected as a payment toward the
+    // now-larger balance (previously this cash was shown but never recorded).
+    if (!isReturn && (p.collect || 0) > 0.005) {
+      inv.paid = +(((inv.paid || 0) + p.collect)).toFixed(2);
+      D.payments.unshift({ id: "p" + Date.now(), date: D.today, inv: inv.no, clientId: inv.clientId, amount: p.collect, method: "Exchange collection", acct: p.collectAccount || "1010" });
+    }
     inv.status = invStatus(inv);
     window.logAudit("CREATE", isReturn ? "Return" : "Exchange", "creditNotes", cn.no, (isReturn ? "Return " : "Exchange ") + cn.no + " against " + inv.no + " · " + fmt(p.refund || Math.abs(p.total)) + (p.restockingFee > 0 ? " · fee " + fmt(p.restockingFee) : ""));
-    if (window.persist) window.persist("creditNotes", "inventory", "invoices", "defectiveProducts", "accounts");
+    const ok = window.persistNow ? await window.persistNow("creditNotes", "inventory", "invoices", "defectiveProducts", "accounts", "payments") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+      setReturnOpen(false); force((x) => x + 1); return;
+    }
     setReturnOpen(false);
     pushToast && pushToast((isReturn ? "Return " : "Exchange ") + cn.no + " recorded against " + inv.no);
     force((x) => x + 1);
@@ -446,6 +478,12 @@ function InvoiceDetail({ no, go, pushToast }) {
 function InvoiceReturnModal({ inv, onClose, onSubmit }) {
   const D = BCCWE;
   const origLines = deriveLines(inv);
+  // How much of each line was already returned/exchanged on this invoice, so we
+  // can't return more than was sold (previously uncapped → unlimited refunds).
+  const priorReturned = {};
+  (D.creditNotes || []).forEach((c) => { if (c.origInv === inv.no) (c.items || []).forEach((it) => { if (it.code) priorReturned[it.code] = (priorReturned[it.code] || 0) + (it.qty || 0); }); });
+  const maxRet = origLines.map((l) => (l.code ? Math.max(0, (l.qty || 0) - (priorReturned[l.code] || 0)) : (l.qty || 0)));
+  const lineNet = (l) => (l.price || 0) * (1 - (l.disc || 0) / 100); // price actually billed, net of line discount
   const m = D.TAX.modes[inv.tax] || { gst: 0, pst: 0 };
   const [mode, setMode] = useState("Return");      // Return | Exchange
   const [disp, setDisp] = useState("Inventory");   // Inventory | Defected
@@ -461,11 +499,16 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
   const [refundAcctSel, setRefundAcctSel] = useState("1010"); // 1000 Cash | 1010 Bank
   const [refundPaidVal, setRefundPaidVal] = useState("");
 
-  const setQ = (i, v) => setQtys((a) => a.map((x, j) => (j === i ? Math.max(0, Math.min(origLines[i].qty, isNaN(v) ? 0 : v)) : x)));
+  const setQ = (i, v) => setQtys((a) => a.map((x, j) => (j === i ? Math.max(0, Math.min(maxRet[i], isNaN(v) ? 0 : v)) : x)));
   const step = (i, d) => setQ(i, (qtys[i] || 0) + d);
-  const fillAll = () => setQtys(origLines.map((l) => l.qty));
+  const fillAll = () => setQtys(maxRet.slice());
 
-  const retSub = origLines.reduce((s, l, i) => s + qtys[i] * l.price, 0);
+  // Refund the price actually billed (net of line discount) and prorate any
+  // invoice-level discount, so a returned item isn't refunded for MORE than paid.
+  const retSubGross = origLines.reduce((s, l, i) => s + qtys[i] * lineNet(l), 0);
+  const origSub = origLines.reduce((s, l) => s + (l.qty || 0) * lineNet(l), 0);
+  const invDiscShare = (inv.invDisc && origSub > 0) ? +(inv.invDisc * (retSubGross / origSub)).toFixed(2) : 0;
+  const retSub = +(retSubGross - invDiscShare).toFixed(2);
   const exSub = mode === "Exchange" ? exItems.reduce((s, l) => s + (l.qty || 0) * (l.price || 0), 0) : 0;
   const fee = feeMode === "percent" ? +(retSub * (Number(feeVal) || 0) / 100).toFixed(2)
     : feeMode === "amount" ? Math.min(retSub, Number(feeVal) || 0) : 0;
@@ -497,6 +540,8 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
       refundWithTax, refundPaid: +refundPaid.toFixed(2),
       refundStatus: refund <= 0 ? "n/a" : refundStatus,
       refundAccount: refundStatus === "unpaid" ? "" : refundAcctSel,
+      collect: collect > 0.005 ? +collect.toFixed(2) : 0,
+      collectAccount: refundAcctSel,
       exchangeItems: mode === "Exchange" ? exItems.filter((l) => l.desc && l.qty > 0) : [],
     });
   }
@@ -526,17 +571,17 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
           {origLines.map((l, i) => (
             <tr key={i} style={qtys[i] > 0 ? { background: "var(--accent-soft)" } : null}>
               <td>{l.desc}{l.code ? <em className="cat-tag" style={{ marginLeft: 6 }}>{l.code}</em> : null}</td>
-              <td className="r">{l.qty}</td>
-              <td className="r mono">{fmt(l.price)}</td>
+              <td className="r">{l.qty}{maxRet[i] < l.qty ? <em className="muted" style={{ fontSize: 11, display: "block" }}>{maxRet[i]} left</em> : null}</td>
+              <td className="r mono">{fmt(lineNet(l))}</td>
               <td>
                 <div style={{ display: "flex", gap: 4, justifyContent: "center", alignItems: "center" }}>
-                  <button type="button" style={stepBtn} onClick={() => step(i, -1)}>−</button>
-                  <input type="number" min="0" max={l.qty} value={qtys[i]} onChange={(e) => setQ(i, parseInt(e.target.value, 10))}
+                  <button type="button" style={stepBtn} disabled={maxRet[i] <= 0} onClick={() => step(i, -1)}>−</button>
+                  <input type="number" min="0" max={maxRet[i]} value={qtys[i]} disabled={maxRet[i] <= 0} onChange={(e) => setQ(i, parseInt(e.target.value, 10))}
                     style={{ width: 56, textAlign: "center" }} />
-                  <button type="button" style={stepBtn} onClick={() => step(i, 1)}>+</button>
+                  <button type="button" style={stepBtn} disabled={maxRet[i] <= 0} onClick={() => step(i, 1)}>+</button>
                 </div>
               </td>
-              <td className="r mono">{fmt(qtys[i] * l.price)}</td>
+              <td className="r mono">{fmt(qtys[i] * lineNet(l))}</td>
             </tr>
           ))}
         </tbody>

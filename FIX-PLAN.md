@@ -215,20 +215,24 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
       identically from restored `discMode/discVal/discTiming`); preview opens with a discount; order conversion moves
       stock once. **Browser smoke-test recommended on the live site.**
 
-### Phase 7 — Returns & exchanges correctness  · CRITICAL/HIGH
-- [ ] **No cumulative prior-return check → the same invoice can be fully returned repeatedly** (unlimited refunds,
-      double restock). `screens-detail.jsx:424-521` → clamp each line to `sold − alreadyReturned` from prior credit notes.
-- [ ] **Refund computed on undiscounted price** → customer over-refunded. `screens-detail.jsx:446,451-452` → use
-      net-of-discount price; prorate invoice-level discount.
-- [ ] **Refunded invoices grow a phantom balance due and flip to Unpaid/Partial.** `screens-detail.jsx:20-30,144`
-      → compare net paid against `total + Σ(cn.total)` (cn.total already negative).
-- [ ] **Exchange "collect from customer" money is never recorded anywhere.** `screens-detail.jsx:456,176-212` →
-      record collected/paid-out exchange cash as a payment the books read.
-- [ ] **Full refund written to `inv.refunded` even when unpaid/partial** → cash reduced before money leaves.
-      `screens-detail.jsx:205` → accumulate `refundPaid`, not the full `refund`.
-- [ ] **Return/exchange saves fire-and-forget (`persist`, no rollback);** `recordPayment` persists nothing.
-      `screens-detail.jsx:151-160,208` → snapshot + `await persistNow` + restore on failure.
-- **Verify:** return the same invoice twice (second offers only remaining qty); discounted return refunds the paid amount; exchange collect lands in cash.
+### Phase 7 — Returns & exchanges correctness  · CRITICAL/HIGH  *(done)*
+- [x] **No cumulative prior-return check → the same invoice could be fully returned repeatedly.** `screens-detail.jsx`
+      → each line is capped at `sold − alreadyReturned` (summed from prior credit notes); fully-returned lines are
+      disabled. *(done — verified: sold 5, returned 3 → max 2; fully returned → 0.)*
+- [x] **Refund computed on undiscounted price** → customer over-refunded. `screens-detail.jsx` → refund uses the
+      price net of line discount, and prorates any invoice-level discount. *(done — $100 @20% now refunds $89.60, not $112.)*
+- [x] **Refunded invoices grew a phantom balance due and flipped to Unpaid/Partial.** `screens-detail.jsx` → new
+      `invEffectiveTotal` (= total + Σ credit-note totals) and `invOpenBalance`; status/balance/Unpaid all use them.
+      *(done — verified by harness across 5 scenarios incl. paid-refund, owed-refund, exchange-up.)*
+- [x] **Exchange "collect from customer" money is never recorded.** `screens-detail.jsx` → an exchange-up now records
+      the collected amount as a payment on the invoice (account-selectable), so it reaches the books. *(done)*
+- [x] **Full refund written to `inv.refunded` even when unpaid/partial.** `screens-detail.jsx` → `inv.refunded` now
+      accumulates only `refundPaid` (the amount actually paid out), for exchanges as well as returns. *(done)*
+- [x] **Return/exchange saves were fire-and-forget with no rollback.** `screens-detail.jsx` → `recordReturn` now
+      snapshots the touched collections, `await persistNow`, and restores on failure. *(done)*
+- [x] Also: `UnpaidInvoices` excludes order (deposit) invoices and uses the return-aware open balance everywhere.
+- **Verify:** *(harness-verified)* status/balance across paid/owed-refund/exchange scenarios; cap and discount-refund
+      math checked by hand. **Browser smoke-test recommended** for the modal UX (disabled rows, "N left" hint).
 
 ### Phase 8 — Inventory / purchase orders / receiving / POS  · HIGH/MEDIUM
 - [ ] **Stock movement/aging read a stale demo closure, not live data.** `data.js:926-936` → read `window.BCCWE.itemSales`.
