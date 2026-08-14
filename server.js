@@ -107,6 +107,8 @@ function getAuth() {
 // In-memory session tokens (cleared on server restart -> users simply log in again).
 const sessions = new Map(); // token -> { userId, name, role, isOwner, expires }
 const resetCodes = new Map(); // lower(id/email) -> { code, exp } for staff resets
+const resetTries = new Map(); // lower(id/email) -> failed reset-code attempts (brute-force guard)
+const adminFails = new Map(); // ip -> { count, until } for the /admin uploader (brute-force guard)
 const SESSION_TTL = 12 * 60 * 60 * 1000; // 12 hours
 function newSession(info) {
   const token = crypto.randomBytes(24).toString("hex");
@@ -149,13 +151,46 @@ async function getCollectionSafe(name) {
   } catch (e) { return null; }
 }
 
+// Remove staff login passwords from the full-state payload sent to the browser.
+// They are only ever needed server-side (login checks them against the DB), so
+// the client never needs to see them — previously ANY logged-in user could read
+// every staff password out of /api/state and sign in as an admin.
+function redactForClient(state) {
+  if (state && Array.isArray(state.users)) {
+    state.users = state.users.map(function (u) { return Object.assign({}, u, { password: "" }); });
+  }
+  return state;
+}
+// The client saves the whole `users` collection back with blank (redacted)
+// passwords. Re-fill each blank password from the stored value so a normal save
+// never wipes a staff password. A non-blank password (a real change) passes
+// through untouched. Match on id, then email, then name.
+async function preserveUserSecrets(name, data) {
+  if (name !== "users" || !Array.isArray(data)) return data;
+  const existing = (await getCollectionSafe("users")) || [];
+  const findExisting = function (u) {
+    return existing.find(function (e) {
+      return (u.id && e.id === u.id)
+        || (u.email && e.email && String(e.email).toLowerCase() === String(u.email).toLowerCase())
+        || (u.name && e.name && String(e.name).toLowerCase() === String(u.name).toLowerCase());
+    });
+  };
+  data.forEach(function (u) {
+    if (u && (u.password === "" || u.password == null)) {
+      const e = findExisting(u);
+      if (e && e.password) u.password = e.password;
+    }
+  });
+  return data;
+}
+
 app.get("/api/state", requireAuth, async (_req, res) => {
   try {
     const state = await getAllState();
     if (Object.keys(state).length === 0) {
       return res.json({ empty: true });
     }
-    res.json(state);
+    res.json(redactForClient(state));
   } catch (e) {
     console.error("GET /api/state failed:", e.message);
     res.status(500).json({ error: "database_error", message: e.message });
@@ -164,7 +199,7 @@ app.get("/api/state", requireAuth, async (_req, res) => {
 
 app.post("/api/save/:collection", requireAuth, async (req, res) => {
   try {
-    await saveCollection(req.params.collection, req.body);
+    await saveCollection(req.params.collection, await preserveUserSecrets(req.params.collection, req.body));
     res.json({ ok: true });
   } catch (e) {
     console.error("POST /api/save failed:", e.message);
@@ -177,9 +212,10 @@ app.post("/api/save-bulk", requireAuth, async (req, res) => {
   try {
     await conn.beginTransaction();
     for (const [name, data] of Object.entries(req.body)) {
+      const merged = await preserveUserSecrets(name, data);
       await conn.query(
         "INSERT INTO collections (name, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)",
-        [name, JSON.stringify(data)]
+        [name, JSON.stringify(merged)]
       );
     }
     await conn.commit();
@@ -198,9 +234,10 @@ app.post("/api/state", requireAuth, async (req, res) => {
   try {
     await conn.beginTransaction();
     for (const [name, data] of Object.entries(req.body)) {
+      const merged = await preserveUserSecrets(name, data);
       await conn.query(
         "INSERT INTO collections (name, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)",
-        [name, JSON.stringify(data)]
+        [name, JSON.stringify(merged)]
       );
     }
     await conn.commit();
@@ -237,12 +274,25 @@ app.get("/admin", (_req, res) => {
 });
 
 app.post("/api/admin/upload", (req, res) => {
+  const ip = String(req.ip || "");
+  const f0 = adminFails.get(ip);
+  if (f0 && f0.count >= 5 && f0.until > Date.now()) {
+    return res.status(429).json({ error: "Too many attempts. Try again in a few minutes." });
+  }
   if (!dbConfig.adminPassword) {
     return res.status(403).json({ error: "Admin password is not set on the server. Set adminPassword in db-config.json." });
   }
-  if (req.body.password !== dbConfig.adminPassword) {
+  // Constant-time comparison + rate limiting so the admin password can't be
+  // brute-forced (it can overwrite any app .jsx, i.e. run code in every browser).
+  const given = Buffer.from(String(req.body.password || ""));
+  const expected = Buffer.from(String(dbConfig.adminPassword));
+  const okPw = given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  if (!okPw) {
+    const f = adminFails.get(ip) || { count: 0, until: 0 };
+    f.count += 1; f.until = Date.now() + 10 * 60 * 1000; adminFails.set(ip, f);
     return res.status(401).json({ error: "Wrong admin password." });
   }
+  adminFails.delete(ip);
   const files = Array.isArray(req.body.files) ? req.body.files : [];
   if (files.length === 0) {
     return res.status(400).json({ error: "No files were sent." });
@@ -378,9 +428,13 @@ app.post("/api/login", async (req, res) => {
     const users = (await getCollectionSafe("users")) || [];
     const roles = (await getCollectionSafe("roles")) || [];
     const u = users.find(function (x) {
-      if (x.active === false) return false;
+      // Never authenticate the auto-generated owner record (it carries a blank
+      // password), and never let a blank/absent stored password match — together
+      // these allowed a full admin takeover by logging in with an empty password.
+      if (x.active === false || x.isOwner) return false;
+      if (!x.password) return false;
       const match = idLc === String(x.email || "").toLowerCase() || idLc === String(x.name || "").toLowerCase() || idLc === String(x.username || "").toLowerCase();
-      return match && String(x.password || "") === String(password);
+      return match && String(x.password) === String(password);
     });
     if (u) {
       const roleName = (roles.find(function (r) { return r.id === u.role; }) || {}).name || u.role || "User";
@@ -507,18 +561,27 @@ app.post("/api/reset-password", async (req, res) => {
     const a = await getAuth();
     // Owner account
     if (given === String(a.userId).toLowerCase() || (a.email && given === String(a.email).toLowerCase())) {
+      const t = resetTries.get(given) || 0;
       if (!a.resetCode || code !== String(a.resetCode) || Date.now() > Number(a.resetExpires)) {
+        resetTries.set(given, t + 1);
+        // Invalidate the code after too many wrong guesses so it can't be brute-forced.
+        if (t + 1 >= 5) { await pool.query("UPDATE auth SET resetCode = '', resetExpires = 0 WHERE id = 1"); resetTries.delete(given); }
         return res.status(400).json({ ok: false, error: "Invalid or expired reset code." });
       }
+      resetTries.delete(given);
       const salt = crypto.randomBytes(16).toString("hex");
       await pool.query("UPDATE auth SET passHash = ?, salt = ?, resetCode = '', resetExpires = 0 WHERE id = 1", [hashPw(newPassword, salt), salt]);
       return res.json({ ok: true });
     }
     // Staff user
     const rc = resetCodes.get(given);
+    const ts = resetTries.get(given) || 0;
     if (!rc || code !== rc.code || Date.now() > rc.exp) {
+      resetTries.set(given, ts + 1);
+      if (ts + 1 >= 5) { resetCodes.delete(given); resetTries.delete(given); }
       return res.status(400).json({ ok: false, error: "Invalid or expired reset code." });
     }
+    resetTries.delete(given);
     const users = (await getCollectionSafe("users")) || [];
     const u = users.find((x) => given === String(x.email || "").toLowerCase() || given === String(x.name || "").toLowerCase());
     if (!u) return res.status(400).json({ ok: false, error: "Account not found." });

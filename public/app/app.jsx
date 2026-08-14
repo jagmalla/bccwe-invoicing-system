@@ -224,7 +224,11 @@ function App() {
 
         <main className="content">
           <ScreenErrorBoundary key={route}>
-          {NAV.some((n) => n.id === base) && !navAllowed(base) ? (
+          {/* Gate on the route's governing module (navActive maps detail routes
+              like invoiceview→history, client→people, purchase/po/receive→inventory)
+              so these pages can't be reached by typing the hash when the role has
+              no permission — previously only sidebar-listed routes were gated. */}
+          {!navAllowed(navActive) ? (
             <Card><Empty text="You don't have access to this section." /></Card>
           ) : <>
           {base === "dashboard" && <Dashboard go={go} store={store} />}

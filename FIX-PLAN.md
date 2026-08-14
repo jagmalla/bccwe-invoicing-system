@@ -113,33 +113,33 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
       `persistNow` is in flight; write audit log only *after* a confirmed save.
 - **Verify:** two-tab test — create records in both, confirm none vanish and no number collides.
 
-### Phase 3 — Security & access control  · CRITICAL *(depth depends on security answer)*
-- [ ] **Blank-password admin takeover.** After the owner logs in once, an auto-seeded `u_owner`
-      record has `password:""`; the staff-login branch matches it and `""===""` passes.
-      `server.js:378-388` + `data.js:1524-1531` → in the staff branch skip `isOwner` records and
-      reject empty passwords.
-- [ ] **`/api/state` ships every secret to any logged-in user** (staff plaintext passwords, SMTP
-      passwords, WhatsApp token) — a client-portal user can read them and log in as admin.
-      `server.js:135-142,152-163` → strip `users[].password`, `smtpProfiles[].password`, `waConfig.token`.
-- [ ] **No server-side write authorization.** Any token holder can `POST /api/save-bulk` to rewrite
-      roles/users or wipe invoices. `server.js:175-215` → validate the session role against the
-      collections being written.
-- [ ] **Detail routes reachable by hash regardless of role.** The render gate only blocks routes whose
-      `base` is a NAV id; `invoiceview`, `client`, `purchase`, `po`, `receive` render unconditionally.
-      `app.jsx:226-254` → map each base to its module and gate on it; filter `InvoiceDetail`/`ClientAccount`
-      by `sessionClientId()` for client users.
-- [ ] **Client portal defaults to another (wholesale) client & leaks their prices.** `screens-shop.jsx:11-13`
-      uses `session.userId` (email) to find the user, which never matches `u.id`. → use `sessionClientId()`
-      and hide the client selector for client users.
-- [ ] **Orders screen renders staff actions (Receive/Mark paid/Delete) for client users.**
-      `screens-orders.jsx:114-123` → gate each action by the `orders` permission; hide for client users.
-- [ ] **Password-reset code brute-forceable** (6 digits, 30 min, no attempt limit/rate limit).
-      `server.js:456-532` → invalidate after ~5 tries, rate-limit, longer CSPRNG token.
-- [ ] **`/api/admin/upload` hardening** — plaintext non-constant-time compare, no rate limit, can
-      overwrite any `public/app/*.js` (stored XSS). `server.js:239-279` → `timingSafeEqual`, rate limit,
-      optionally require an owner session.
-- [ ] **`send-mail` / `send-whatsapp` abusable by any user.** `server.js:313-339,560-579` → restrict to
-      admin/owner and/or constrain recipients.
+### Phase 3 — Security & access control  · CRITICAL *(core done; two items deferred — see notes)*
+- [x] **Blank-password admin takeover.** `server.js` → the staff-login branch now skips `isOwner` records
+      and rejects any blank/absent stored password. *(done — verified: blank-pw owner login blocked, real
+      staff login still works.)* **This is the important one — it was an unauthenticated takeover.**
+- [x] **`/api/state` ships staff passwords to any logged-in user.** `server.js` → `redactForClient` blanks
+      `users[].password` in the payload; `preserveUserSecrets` re-fills it on write so a save can't wipe it.
+      *(done — verified: redact + blank round-trip + real change + new user all correct.)*
+      **DEFERRED (needs your live email test):** `smtpProfiles[].password` and `waConfig.token` are still sent —
+      redacting them safely means moving secret handling into `send-mail`/`test-smtp`/`send-whatsapp` server-side,
+      which I don't want to change blind and risk breaking your invoice emails. Do this with a staging test.
+- [x] **Detail routes reachable by hash regardless of role.** `app.jsx` → the render gate now checks the route's
+      governing module (`navActive`: invoiceview→history, client→people, purchase/po/receive→inventory). *(done)*
+- [x] **Password-reset code brute-forceable.** `server.js` → the code is invalidated after 5 wrong attempts
+      (owner and staff paths). *(done)*
+- [x] **`/api/admin/upload` hardening** — now uses `crypto.timingSafeEqual` and per-IP rate limiting (5 tries →
+      10-min lockout). `server.js`. *(done)*
+- [ ] **No server-side write authorization.** Any token holder can `POST /api/save-bulk` to rewrite roles/users
+      or wipe invoices. **DEFERRED** — this is a larger architectural change (validate session role vs. the
+      collections being written) best done as its own pass. With 2 trusted staff the practical risk is low, but
+      it should still be closed.
+- [ ] **Client portal defaults to another (wholesale) client & leaks prices** / **Orders shows staff actions to
+      client users.** `screens-shop.jsx`, `screens-orders.jsx`. **DEFERRED** — only affects `r_client` portal
+      logins; the Phase 3 route-gate already blocks client-role users from the staff detail pages. Revisit if/when
+      you enable customer-portal logins.
+- [ ] **`send-mail` / `send-whatsapp` abusable by any user.** **DEFERRED** — staff legitimately email invoices,
+      so a blanket admin-only restriction would break workflows; the right fix (block only `r_client`) pairs with
+      the client-portal work above.
 - [ ] **Staff per-store access is ineffective** (session-field mismatch + empty `companies:[]` treated as
       "all"). `data.js:481-488` → look up by `s.uid`; decide `[]` = none vs all.
 - [ ] *(Lower)* deactivated staff keep access till TTL; account enumeration on forgot-password; timing-unsafe
