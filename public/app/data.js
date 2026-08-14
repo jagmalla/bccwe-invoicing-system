@@ -1344,8 +1344,14 @@
     }
   }
 
-  // Always show the live date
-  try { window.BCCWE.today = new Date().toISOString().slice(0, 10); } catch (e) {}
+  // Always show the live date — LOCAL calendar date, not UTC. toISOString() is
+  // UTC, so from ~5pm Pacific onward it rolls to tomorrow and stamps invoices,
+  // payments and aging with the wrong day. Build it from local components.
+  try {
+    var _n = new Date();
+    var _pad2 = function (x) { return (x < 10 ? "0" : "") + x; };
+    window.BCCWE.today = _n.getFullYear() + "-" + _pad2(_n.getMonth() + 1) + "-" + _pad2(_n.getDate());
+  } catch (e) {}
 
   // ---- instant save for explicitly named collections ----
   window.persist = function (/* ...collectionNames */) {

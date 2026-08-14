@@ -149,7 +149,10 @@ function storeFinance(filter) {
   (D.invoices || []).forEach((i) => {
     if (!storeMatch(i, filter)) return;
     if (i.kind === "order") return; // order invoices aren't sales yet — no revenue
-    revenue += i.subtotal || 0;
+    // Net-of-tax consideration = subtotal − invoice-level discount + charges.
+    // Using i.subtotal alone overstated revenue by every discount and dropped
+    // charge income, so the P&L disagreed with the Trial Balance (4000/4010).
+    revenue += (i.total || 0) - (i.gst || 0) - (i.pst || 0);
     gst += i.gst || 0; pst += i.pst || 0;
     (deriveLines(i) || []).forEach((l) => { cogs += (l.qty || 0) * (l.cost || 0); });
   });
@@ -182,8 +185,9 @@ function storeBalances(filter) {
     if (!storeMatch(i, filter)) return;
     const paid = i.paid || 0;
     if (i.kind === "order") { cash += paid; deposits += paid; return; } // deposit held as liability
-    cash += paid - (i.refunded || 0);
+    cash += paid; // refunds are subtracted once, in the credit-note loop below (was double-counted here)
     ar += Math.max(0, (i.total || 0) - paid);
+    deposits += Math.max(0, paid - (i.total || 0)); // overpayment kept as customer credit (liability)
     taxPay += (i.gst || 0) + (i.pst || 0);
   });
   (D.creditNotes || []).forEach((cn) => {
@@ -193,7 +197,8 @@ function storeBalances(filter) {
   });
   (D.cashSales || []).forEach((s) => {
     if (!storeMatch(s, filter)) return;
-    cash += s.total || 0;
+    cash += s.paid != null ? s.paid : (s.total || 0); // only collected cash hits the till
+    ar += s.owed || 0;                                 // "on account" register sales are receivables
     taxPay += (s.gst || 0) + (s.pst || 0);
   });
   // Inventory is held company-wide, so it's only shown in the combined view.
@@ -241,7 +246,8 @@ function liveAccountBalances(filter) {
     add("1300", -cogs);
     add("2100", i.gst || 0); add("2110", i.pst || 0);
     add("1200", Math.max(0, (i.total || 0) - (i.paid || 0)));
-    add(i.payMethod === "Cash" ? "1000" : "1010", (i.paid || 0) - (i.refunded || 0));
+    add(i.payMethod === "Cash" ? "1000" : "1010", i.paid || 0); // refund removed once, in the credit-note loop
+    add("2200", Math.max(0, (i.paid || 0) - (i.total || 0)));   // overpayment kept as a customer-credit liability
   });
   (D.creditNotes || []).forEach((cn) => {
     if (!cnMatch(cn, filter)) return;
@@ -258,7 +264,9 @@ function liveAccountBalances(filter) {
   });
   (D.cashSales || []).forEach((s) => {
     if (!storeMatch(s, filter)) return;
-    add(s.method === "Cash" ? "1000" : "1010", s.total || 0);
+    const collected = s.paid != null ? s.paid : (s.total || 0);
+    add(s.method === "Cash" ? "1000" : "1010", collected);
+    add("1200", s.owed || 0); // "on account" register sales are receivables, not cash
     if (s.subtotal != null) {
       add("4000", s.subtotal); add("2100", s.gst || 0); add("2110", s.pst || 0); add("4200", s.restockingFee || 0);
     } else {
@@ -270,6 +278,10 @@ function liveAccountBalances(filter) {
   bal["1300"] = (filter === "all" || !filter)
     ? (D.inventory || []).reduce((x, it) => x + (it.stock || 0) * (it.cost || 0), 0) : 0;
   // Balance the books: plug the net into Retained Earnings.
+  // NOTE: this stays a full plug until Phase 8 makes purchases/receiving post to
+  // Inventory (1300). Today 1300 is overwritten with a stock snapshot (below) that
+  // is disconnected from the COGS flow, so the residual is legitimately large and
+  // must not be surfaced as an "out of balance" error yet.
   const typeOf = {}; (D.accounts || []).forEach((a) => { typeOf[a.code] = a.type; });
   let dr = 0, cr = 0;
   Object.keys(bal).forEach((code) => {
