@@ -206,10 +206,18 @@ function buildInvoiceImport(objs, companyId) {
   const lc = (s) => norm(s).toLowerCase();
   const round2 = (n) => Math.round(n * 100) / 100;
   const normDate = (s) => {
-    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(norm(s));
-    if (!m) return "";
-    const p = (x) => (x.length < 2 ? "0" + x : x);
-    return m[1] + "-" + p(m[2]) + "-" + p(m[3]);
+    const v = norm(s);
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(v);
+    const p = (x) => (String(x).length < 2 ? "0" + x : String(x));
+    if (m) return m[1] + "-" + p(m[2]) + "-" + p(m[3]);
+    // Also accept the unambiguous written form many systems export,
+    // e.g. "Jul 24, 2026" / "July 24 2026". Pure-numeric non-ISO forms
+    // (04/05/2026) stay rejected — day-first vs month-first is guesswork.
+    if (/^[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}$/.test(v)) {
+      const d = new Date(v);
+      if (!isNaN(d)) return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+    }
+    return "";
   };
   // "" → null (use default) · valid → mode string · anything else → undefined (error)
   const taxFromPc = (v) => {
@@ -237,8 +245,10 @@ function buildInvoiceImport(objs, companyId) {
     if (!date) { badRows.push("Row " + rowNo + ": Invoice Date must be YYYY-MM-DD"); return; }
     if (!clientN) { badRows.push("Row " + rowNo + ": missing Client Name"); return; }
     if (!norm(o.item)) { badRows.push("Row " + rowNo + ": missing Item Code or Description"); return; }
-    if (!(qty > 0)) { badRows.push("Row " + rowNo + ": Quantity must be a number above 0"); return; }
-    if (isNaN(price) || price < 0) { badRows.push("Row " + rowNo + ": Unit Price must be a number"); return; }
+    // Negative quantity or price is allowed — many systems write invoice-level
+    // discounts as an adjustment line (e.g. "Discount 25%" · $133.75 × −1).
+    if (isNaN(qty) || qty === 0) { badRows.push("Row " + rowNo + ": Quantity must be a non-zero number"); return; }
+    if (isNaN(price)) { badRows.push("Row " + rowNo + ": Unit Price must be a number"); return; }
     if (taxFromPc(o.taxpc) === undefined) { badRows.push("Row " + rowNo + ": Tax Treatment must be 0, 5, 7 or 12"); return; }
     if (existingNos.has(lc(no))) { dupExisting.add(no); return; }
     let g = groups.get(lc(no));
@@ -305,7 +315,7 @@ function buildInvoiceImport(objs, companyId) {
       const payDate = normDate(g.rows.map((r) => norm(r.paydate)).find(Boolean) || "") || g.date;
       payments.push({ id: "p_imp" + Date.now().toString(36) + "_" + gi, date: payDate, inv: g.no, clientId: client.id, amount: paid, method: "Historical import", acct: "1010" });
     }
-    lines.forEach((l) => { if (l.code && itemsByCode[lc(l.code)] && (D.inventory || []).some((x) => x.code === l.code)) itemSales.push({ date: g.date, code: l.code, clientId: client.id, qty: l.qty, price: l.price, disc: l.disc || 0 }); });
+    lines.forEach((l) => { if (l.qty > 0 && l.code && itemsByCode[lc(l.code)] && (D.inventory || []).some((x) => x.code === l.code)) itemSales.push({ date: g.date, code: l.code, clientId: client.id, qty: l.qty, price: l.price, disc: l.disc || 0 }); });
   });
 
   return { invoices, newClients, payments, itemSales, lineCount,
