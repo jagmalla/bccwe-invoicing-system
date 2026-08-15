@@ -586,21 +586,61 @@ function cnMatch(cn, filter) {
 // replacement goods sent out on an exchange add COGS. Defective cost comes from
 // the defectiveProducts rows the return wrote (ref = the CN number) — captured
 // at return time. Seed/legacy CNs have no items[] and contribute nothing.
+// Every account the REPORTS must show: the chart of accounts PLUS any code that
+// carries a derived balance but is missing from the chart — a deleted account
+// still referenced by transactions, a custom expense category pointing at an
+// unknown code, or imported data. Reports used to iterate the chart only, so
+// that money vanished from the Trial Balance and Balance Sheet and threw them
+// out of balance by exactly the hidden amount.
+function reportAccounts(bal) {
+  const out = (BCCWE.accounts || []).slice();
+  const known = {};
+  out.forEach((a) => { known[a.code] = true; });
+  Object.keys(bal || {}).forEach((code) => {
+    if (known[code] || Math.abs(bal[code] || 0) < 0.005) return;
+    const d = String(code).charAt(0);
+    const type = d === "1" ? "Asset" : d === "2" ? "Liability" : d === "3" ? "Equity" : d === "4" ? "Revenue" : "Expense";
+    out.push({ code: code, name: "Unmapped account " + code, type: type, unmapped: true });
+  });
+  return out.sort((a, b) => String(a.code).localeCompare(String(b.code), "en", { numeric: true }));
+}
+
+// Is this expense a NON-CASH stock write-off (defective / lost stock)? Its cost
+// comes out of inventory, so it must not also credit cash or bank. New records
+// carry `stockLoss: true`; older ones are recognised by the "Stock adjustment"
+// method the write-off screens have always written, or by a category flagged
+// `stockLoss` in the expense-category setup.
+function isStockLossExpense(e) {
+  if (!e) return false;
+  if (e.stockLoss) return true;
+  if (String(e.method || "") === "Stock adjustment") return true;
+  const cat = ((BCCWE.expenseCategories || []).find((c) => c.name === e.category)) || null;
+  return !!(cat && cat.stockLoss);
+}
+
 function cnCosts(cn) {
   const D = BCCWE;
+  // Unit cost for a credit-note line: ALWAYS prefer the cost snapshotted on the
+  // line when the return was recorded. Falling back to the item's CURRENT cost
+  // (the old behaviour, kept only for records saved before snapshots existed)
+  // re-valued historical returns every time an item's cost was edited — the
+  // books reversed more or less COGS than the original sale ever charged.
+  const unitCost = (l) => {
+    if (l && l.cost != null) return l.cost || 0;
+    const it = (D.inventory || []).find((x) => x.code === (l && l.code));
+    return it ? (it.cost || 0) : 0;
+  };
   let restock = 0, defect = 0, exchangeOut = 0;
   if (cn.retDisp === "Inventory") (cn.items || []).forEach((l) => {
     if (!l.code || !(l.qty > 0)) return;
-    const it = (D.inventory || []).find((x) => x.code === l.code);
-    restock += (it ? (it.cost || 0) : 0) * l.qty;
+    restock += unitCost(l) * l.qty;
   });
   if (cn.retDisp === "Defected") (D.defectiveProducts || []).forEach((d) => {
     if (d.ref === cn.no) defect += d.costLoss || 0;
   });
   (cn.exchangeItems || []).forEach((l) => {
     if (!l.code || !(l.qty > 0)) return;
-    const it = (D.inventory || []).find((x) => x.code === l.code);
-    exchangeOut += (it ? (it.cost || 0) : 0) * l.qty;
+    exchangeOut += unitCost(l) * l.qty;
   });
   return { restock, defect, exchangeOut };
 }
@@ -845,7 +885,10 @@ function liveAccountBalances(filter) {
     const pstPaid = m ? (e.amount || 0) * (m.pst || 0) : 0;
     add(e.acct || "6900", (e.amount || 0) + pstPaid);
     add("2100", -gstPaid);
-    add(e.paidFrom || "1010", -((e.amount || 0) + gstPaid + pstPaid));
+    // A stock write-off is a NON-CASH expense: the value leaves inventory (the
+    // 1300 snapshot already reflects the reduced stock), so no money leaves the
+    // bank. Crediting cash here overstated bank outflow by every write-off.
+    if (!isStockLossExpense(e)) add(e.paidFrom || "1010", -((e.amount || 0) + gstPaid + pstPaid));
   });
   (D.cashSales || []).forEach((s) => {
     if (!storeMatch(s, filter)) return;
@@ -898,11 +941,21 @@ function liveAccountBalances(filter) {
   // Inventory (1300). Today 1300 is overwritten with a stock snapshot (below) that
   // is disconnected from the COGS flow, so the residual is legitimately large and
   // must not be surfaced as an "out of balance" error yet.
+  // Normal side per account. A code that carries a balance but is NOT in the
+  // chart (deleted account, custom category with an unknown code) was treated as
+  // credit-normal here, so the Retained-Earnings plug was wrong by twice that
+  // balance. Infer the side from the code's leading digit instead — the same
+  // rule reportAccounts uses, so the engine and the statements agree.
   const typeOf = {}; (D.accounts || []).forEach((a) => { typeOf[a.code] = a.type; });
+  const isDebitNormal = (code) => {
+    const t = typeOf[code];
+    if (t) return t === "Asset" || t === "Expense";
+    const d = String(code).charAt(0);
+    return d === "1" || d === "5" || d === "6" || d === "7" || d === "8" || d === "9";
+  };
   let dr = 0, cr = 0;
   Object.keys(bal).forEach((code) => {
-    const debitNormal = typeOf[code] === "Asset" || typeOf[code] === "Expense";
-    if (debitNormal) dr += bal[code]; else cr += bal[code];
+    if (isDebitNormal(code)) dr += bal[code]; else cr += bal[code];
   });
   if (bal["3900"] === undefined) bal["3900"] = 0;
   bal["3900"] += (dr - cr);
@@ -1001,7 +1054,8 @@ function ledgerLines(filter) {
     const lbl = "Expense — " + (e.desc || e.category || "");
     push(e.acct || "6900", e.date, lbl, (e.amount || 0) + pstPaid, 0);
     push("2100", e.date, "GST input credit — " + (e.category || ""), gstPaid, 0);
-    push(e.paidFrom || "1010", e.date, lbl, 0, (e.amount || 0) + gstPaid + pstPaid);
+    // Non-cash write-off: value leaves inventory, not the bank (see engine note).
+    if (!isStockLossExpense(e)) push(e.paidFrom || "1010", e.date, lbl, 0, (e.amount || 0) + gstPaid + pstPaid);
   });
   (D.cashSales || []).forEach((s) => {
     if (!storeMatch(s, filter)) return;
@@ -1211,10 +1265,10 @@ function Reports({ store, pushToast, go }) {
     }
     if (report === "tb") {
       const live = liveAccountBalances(sf);
-      const rows = (D.accounts || []).map((a) => {
+      const rows = reportAccounts(live).map((a) => {
         const b = live[a.code] || 0;
         const dn = a.type === "Asset" || a.type === "Expense";
-        return { code: a.code, name: a.name, debit: dn ? money(b) : 0, credit: dn ? 0 : money(b) };
+        return { code: a.code, name: a.name + (a.unmapped ? " (not in chart)" : ""), debit: dn ? money(b) : 0, credit: dn ? 0 : money(b) };
       });
       return { filename: "BCCWE-TrialBalance-" + safeLbl, sheet: "Trial Balance",
         cols: [{ key: "code", label: "Code", type: "text" }, { key: "name", label: "Account", type: "text" }, { key: "debit", label: "Debit", type: "number" }, { key: "credit", label: "Credit", type: "number" }],
@@ -1263,12 +1317,12 @@ function Reports({ store, pushToast, go }) {
           totals: { bal: money(rows.reduce((s, r) => s + r.bal, 0)) } } };
     }
     if (report === "client") {
-      const map = {};
-      (D.invoices || []).forEach((i) => { if (i.kind === "order" || !storeMatch(i, sf) || (dated && !inRange(i.date || "", range))) return; map[i.clientId] = (map[i.clientId] || 0) + ((i.total || 0) - (i.gst || 0) - (i.pst || 0)); });
+      const rows = clientRevenueRows(sf, dated ? range : null).sort((a, b) => b.v - a.v);
       return { filename: "BCCWE-IncomeByClient-" + safeLbl, sheet: "Income by Client",
         cols: [{ key: "client", label: "Client", type: "text" }, { key: "revenue", label: "Revenue (pre-tax)", type: "number" }],
-        data: Object.entries(map).map(([id, v]) => ({ client: clientName(id), revenue: money(v) })).sort((a, b) => b.revenue - a.revenue),
-        opts: { title: "BCCWE — Income by Client", subtitle: storeLabel(sf) + " · " + range.label } };
+        data: rows.map((r) => ({ client: r.name, revenue: money(r.v) })),
+        opts: { title: "BCCWE — Income by Client", subtitle: storeLabel(sf) + " · " + range.label,
+          totals: { revenue: money(rows.reduce((s, r) => s + r.v, 0)) } } };
     }
     return null;
   }
@@ -1382,14 +1436,14 @@ function PLReport({ store, range, onDrill }) {
 // yet closed to equity) FOLDED into 3900. Without the fold, the statement was
 // off by exactly net income — assets never equalled liabilities + equity.
 function balanceSheetData(sf) {
-  const D = BCCWE;
   const live = liveAccountBalances(sf);
+  const accts = reportAccounts(live); // includes any unmapped codes carrying money
   let earnings = 0;
-  (D.accounts || []).forEach((a) => {
+  accts.forEach((a) => {
     if (a.type === "Revenue") earnings += live[a.code] || 0;
     else if (a.type === "Expense") earnings -= live[a.code] || 0;
   });
-  const rowsFor = (type) => (D.accounts || [])
+  const rowsFor = (type) => accts
     .filter((a) => a.type === type)
     .map((a) => ({ code: a.code, name: a.name, bal: (live[a.code] || 0) + (a.code === "3900" ? earnings : 0) }))
     .filter((a) => Math.abs(a.bal) > 0.005 || a.code === "3900");
@@ -1446,7 +1500,7 @@ function TrialBalance({ store }) {
     debit_desc: { label: "Debit — high to low", get: (r) => r.dr, dir: "desc" },
     credit_desc: { label: "Credit — high to low", get: (r) => r.cr, dir: "desc" },
   };
-  const base = D.accounts.map((a) => {
+  const base = reportAccounts(live).map((a) => {
     const b = live[a.code] || 0;
     const debitNormal = ["Asset", "Expense"].includes(a.type);
     return { ...a, balance: b, dr: debitNormal ? b : 0, cr: debitNormal ? 0 : b };
@@ -1458,7 +1512,9 @@ function TrialBalance({ store }) {
       <div className="stmt-head"><h3 className="stmt-title">Trial Balance</h3><SortControl sort={sort} setSort={setSort} defs={tbSorts} /></div>
       <table className="data-table tb">
         <thead><tr><th>Code</th><th>Account</th><th className="r">Debit</th><th className="r">Credit</th></tr></thead>
-        <tbody>{rows.map((r) => <tr key={r.code}><td className="mono muted">{r.code}</td><td>{r.name}</td><td className="r mono">{r.dr ? fmtPlain(r.dr) : "—"}</td><td className="r mono">{r.cr ? fmtPlain(r.cr) : "—"}</td></tr>)}</tbody>
+        <tbody>{rows.map((r) => <tr key={r.code}><td className="mono muted">{r.code}</td>
+          <td>{r.name}{r.unmapped && <em className="cat-tag" title="This code carries a balance but is not in your chart of accounts — add it in Accounting → Chart of accounts">not in chart</em>}</td>
+          <td className="r mono">{r.dr ? fmtPlain(r.dr) : "—"}</td><td className="r mono">{r.cr ? fmtPlain(r.cr) : "—"}</td></tr>)}</tbody>
         <tfoot><tr><td /><td>Totals</td><td className="r mono strong">{fmtPlain(dr)}</td><td className="r mono strong">{fmtPlain(cr)}</td></tr></tfoot>
       </table>
       <div className="stmt-check"><Icon name="check" size={15} /> Debits {fmt(dr)} = Credits {fmt(cr)} — books balance</div>
@@ -1610,6 +1666,38 @@ function AgingReport({ store, go }) {
   );
 }
 
+// Pre-tax revenue per client, from EVERY sales channel: invoices, register /
+// POS sales, and returns & exchanges (which reduce it). Previously this counted
+// invoices only, so a client who bought at the register showed nothing and
+// returns were never deducted — the report disagreed with the P&L by exactly
+// the register + return volume. Walk-in register sales (no client on the sale)
+// are grouped under one row so the total still ties to the Income Statement.
+function clientRevenueRows(sf, range) {
+  const D = BCCWE;
+  const inR = (d) => !range || inRange(d || "", range);
+  const map = {};
+  const addTo = (id, amt) => { if (Math.abs(amt) < 0.000001) return; const k = id || "__walkin"; map[k] = (map[k] || 0) + amt; };
+  (D.invoices || []).forEach((i) => {
+    if (i.kind === "order" || !storeMatch(i, sf) || !inR(i.date)) return;
+    addTo(i.clientId, (i.total || 0) - (i.gst || 0) - (i.pst || 0));
+  });
+  (D.cashSales || []).forEach((s) => {
+    if (!storeMatch(s, sf) || !inR(s.date)) return;
+    addTo(s.clientId, s.subtotal != null ? s.subtotal : (s.total || 0));
+  });
+  (D.creditNotes || []).forEach((cn) => {
+    if (!cnMatch(cn, sf) || !inR(cn.date)) return;
+    // cn.subtotal is negative on returns, positive on an exchange-up.
+    const cid = cn.clientId || ((D.invoices || []).find((i) => i.no === cn.origInv) || {}).clientId;
+    addTo(cid, cn.subtotal || 0);
+  });
+  return Object.entries(map).map(([id, v]) => ({
+    id, v,
+    name: id === "__walkin" ? "Walk-in / cash customers" : clientName(id),
+    walkin: id === "__walkin",
+  }));
+}
+
 /* ---------------- Supplier payables (A/P aging) ---------------- */
 function APAgingReport({ store, go }) {
   const D = BCCWE;
@@ -1675,22 +1763,18 @@ function ClientReport({ store, range, go }) {
   const sf = store || "all";
   const [sort, setSort] = useState("value_desc");
   const [q, setQ] = useState("");
-  const map = {};
-  // Pre-tax revenue, orders excluded, period-aware — consistent with the P&L.
-  D.invoices.forEach((i) => {
-    if (i.kind === "order" || !storeMatch(i, sf)) return;
-    if (range && !inRange(i.date || "", range)) return;
-    map[i.clientId] = (map[i.clientId] || 0) + ((i.total || 0) - (i.gst || 0) - (i.pst || 0));
-  });
+  // Pre-tax revenue from invoices + register sales, net of returns — ties to the
+  // Income Statement's "Sales revenue (net of returns)".
+  const rowsAll = clientRevenueRows(sf, range);
   const clientReportSorts = {
     value_desc: { label: "Revenue — high to low", get: (r) => r.v, dir: "desc" },
     value_asc: { label: "Revenue — low to high", get: (r) => r.v, dir: "asc" },
     name_asc: { label: "Client — A to Z", get: (r) => r.name, dir: "asc" },
   };
   const ql = q.trim().toLowerCase();
-  const rows = applySort(Object.entries(map).map(([id, v]) => ({ id, name: clientName(id), v })), sort, clientReportSorts)
-    .filter((r) => !ql || r.name.toLowerCase().includes(ql));
+  const rows = applySort(rowsAll, sort, clientReportSorts).filter((r) => !ql || r.name.toLowerCase().includes(ql));
   const max = Math.max(1, ...rows.map((r) => r.v)); // guard: no rows / all-zero must not break bar widths
+  const shownTotal = rows.reduce((s, r) => s + r.v, 0);
   return (
     <div className="statement">
       <div className="stmt-head">
@@ -1701,7 +1785,7 @@ function ClientReport({ store, range, go }) {
       <div className="bars">
         {rows.map((r) => (
           <div className="bar-row" key={r.id}>
-            {go
+            {go && !r.walkin
               ? <button className="link bar-lbl" style={{ textAlign: "left" }} title="Open this client's account" onClick={() => go("client/" + r.id)}>{r.name}</button>
               : <span className="bar-lbl">{r.name}</span>}
             <div className="bar-track"><div className="bar-fill" style={{ width: Math.max(0, (r.v / max) * 100) + "%" }} /></div>
@@ -1710,6 +1794,8 @@ function ClientReport({ store, range, go }) {
         ))}
         {!rows.length && <Empty icon="people" text={ql ? "No client matches “" + q + "”" : "No client revenue in this period"} />}
       </div>
+      {rows.length > 0 && <StatementRow label={ql ? "Total (filtered)" : "Total — ties to Sales revenue on the P&L"} value={fmt(shownTotal)} total />}
+      <div className="stmt-note">Pre-tax revenue from invoices and register sales, net of returns and exchanges. Click a client to open their account.</div>
     </div>
   );
 }

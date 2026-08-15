@@ -362,6 +362,157 @@ function testAccountingEngine() {
   ok(aug.from === "2026-08-01" && aug.to === "2026-08-31", "month period: Aug 2026 full month");
 }
 
+// ============================================================================
+// 7. Returns / exchanges / defective goods / expenses
+//    Every scenario is checked BOTH ways: the P&L (storeFinance) must agree
+//    with the ledger (liveAccountBalances), so the Income Statement and the
+//    Balance Sheet can never tell different stories.
+// ============================================================================
+function testReturnsExchangesExpenses() {
+  section("Returns / exchanges / defective / expenses");
+
+  const bsand = { self: {}, navigator: { userAgent: "node" }, document: {}, console };
+  bsand.window = bsand; vm.createContext(bsand);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "public/vendor/babel.min.js"), "utf8"), bsand, { filename: "babel.min.js" });
+  const js = bsand.Babel.transform(fs.readFileSync(path.join(ROOT, "public/app/screens-c.jsx"), "utf8"), { presets: ["react"], filename: "screens-c.jsx" }).code;
+
+  const ACCTS = [
+    { code: "1000", name: "Cash", type: "Asset" }, { code: "1010", name: "Bank", type: "Asset" },
+    { code: "1200", name: "AR", type: "Asset" }, { code: "1300", name: "Inventory", type: "Asset" },
+    { code: "2000", name: "AP", type: "Liability" }, { code: "2100", name: "GST", type: "Liability" },
+    { code: "2110", name: "PST", type: "Liability" }, { code: "2200", name: "Deposits", type: "Liability" },
+    { code: "3000", name: "Owner", type: "Equity" }, { code: "3900", name: "RE", type: "Equity" },
+    { code: "4000", name: "Sales", type: "Revenue" }, { code: "4010", name: "Wholesale", type: "Revenue" },
+    { code: "4100", name: "Service", type: "Revenue" }, { code: "4200", name: "Restocking", type: "Revenue" },
+    { code: "5000", name: "COGS", type: "Expense" }, { code: "5100", name: "Defective loss", type: "Expense" },
+    { code: "6100", name: "Rent", type: "Expense" },
+  ];
+  const run = (D) => {
+    const ctx = { console, BCCWE: D, deriveLines: (i) => i.lines || [], poLines: (p) => p.lines || [],
+      clientName: (id) => ((D.clients || []).find((c) => c.id === id) || {}).name || id,
+      inRange: (d, r) => d >= r.from && d <= r.to, React: { createElement: () => null, Fragment: {} },
+      useState: () => [null, () => {}], useEffect: () => {}, useMemo: (f) => f(), useRef: () => ({}) };
+    ctx.window = ctx; vm.createContext(ctx); vm.runInContext(js, ctx, { filename: "screens-c.js" });
+    return ctx;
+  };
+  const base = () => ({ today: "2026-08-15", accounts: JSON.parse(JSON.stringify(ACCTS)),
+    clients: [{ id: "c1", type: "Retail" }], payments: [], creditNotes: [], cashSales: [], expenses: [],
+    purchaseOrders: [], journal: [], defectiveProducts: [], expenseCategories: [],
+    inventory: [{ code: "A", stock: 10, cost: 40 }, { code: "B", stock: 5, cost: 55 }],
+    TAX: { modes: { both: { gst: 0.05, pst: 0.07 }, none: { gst: 0, pst: 0 } } }, invoices: [] });
+  // One sale: item A, cost 40, sold for 100 + tax.
+  const SALE = { no: "I1", clientId: "c1", date: "2026-08-01", subtotal: 100, gst: 5, pst: 7, total: 112, paid: 112, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 100, cost: 40 }] };
+  const CN = (extra) => Object.assign({ no: "CN1", type: "Return", retDisp: "Inventory", origInv: "I1", date: "2026-08-10",
+    subtotal: -100, gst: -5, pst: -7, total: -112, refund: 112, refundPaid: 112, refundAccount: "1010",
+    items: [{ code: "A", qty: 1, price: 100, cost: 40 }] }, extra || {});
+
+  // --- return to inventory: fully reverses the sale ---
+  let D = base(); D.invoices = [SALE]; D.creditNotes = [CN()]; D.inventory[0].stock = 11;
+  let fin = run(D).storeFinance("all", null);
+  ok(Math.abs(fin.revenue) < 0.005 && Math.abs(fin.cogs) < 0.005, "return to inventory reverses revenue and COGS");
+
+  // --- REGRESSION: editing an item's cost must NOT restate past returns ---
+  D = base(); D.invoices = [SALE]; D.creditNotes = [CN()]; D.inventory[0].cost = 60; // cost edited later
+  fin = run(D).storeFinance("all", null);
+  ok(Math.abs(fin.cogs) < 0.005, "return uses the cost snapshotted at sale, not the item's current cost (COGS " + fin.cogs.toFixed(2) + ")");
+
+  // --- defective return: cost reclassified COGS → write-off, total expense unchanged ---
+  D = base(); D.invoices = [SALE];
+  D.creditNotes = [CN({ retDisp: "Defected" })];
+  D.defectiveProducts = [{ date: "2026-08-10", code: "A", qty: 1, costLoss: 40, ref: "CN1", kind: "defective" }];
+  fin = run(D).storeFinance("all", null);
+  ok(Math.abs(fin.writeOff - 40) < 0.005, "defective return records a 40.00 write-off");
+  ok(Math.abs((fin.cogs + fin.writeOff) - 40) < 0.005, "defective return keeps total cost at 40 (reclassified, not doubled)");
+
+  // --- exchange: goods back reverse COGS, replacement out adds its own ---
+  D = base(); D.invoices = [SALE];
+  D.creditNotes = [CN({ no: "EX1", type: "Exchange", subtotal: 30, gst: 1.5, pst: 2.1, total: 33.6, refund: 0, refundPaid: 0, collect: 33.6,
+    exchangeItems: [{ code: "B", qty: 1, price: 130, cost: 55 }] })];
+  fin = run(D).storeFinance("all", null);
+  ok(Math.abs(fin.revenue - 130) < 0.005, "exchange revenue = original 100 + upgrade 30");
+  ok(Math.abs(fin.cogs - 55) < 0.005, "exchange COGS = replacement 55 (returned unit's 40 reversed)");
+
+  // --- REGRESSION: a stock write-off must not credit the bank ---
+  D = base();
+  D.expenses = [{ date: "2026-08-05", category: "Defective Stock", acct: "5100", amount: 200, method: "Stock adjustment", stockLoss: true, tax: "none" }];
+  let ctx = run(D); let bal = ctx.liveAccountBalances("all");
+  ok(Math.abs(bal["1010"] || 0) < 0.005, "stock write-off leaves the bank untouched (non-cash) — bank " + (bal["1010"] || 0).toFixed(2));
+  ok(Math.abs((bal["5100"] || 0) - 200) < 0.005, "stock write-off still charges the loss account 200.00");
+  // legacy record (no stockLoss flag, only the method) must behave the same
+  D = base(); D.expenses = [{ date: "2026-08-05", category: "Defective Stock", acct: "5100", amount: 200, method: "Stock adjustment", tax: "none" }];
+  ok(Math.abs(run(D).liveAccountBalances("all")["1010"] || 0) < 0.005, "legacy write-off (method only) also leaves the bank untouched");
+  // a category flagged stockLoss also counts, even with another method
+  D = base(); D.expenseCategories = [{ name: "Lost Stock", acct: "5100", stockLoss: "lost" }];
+  D.expenses = [{ date: "2026-08-05", category: "Lost Stock", acct: "5100", amount: 90, method: "Bank", tax: "none", paidFrom: "1010" }];
+  ok(Math.abs(run(D).liveAccountBalances("all")["1010"] || 0) < 0.005, "category flagged stockLoss is non-cash too");
+
+  // --- a real cash expense still moves money ---
+  D = base(); D.expenses = [{ date: "2026-08-05", category: "Rent", acct: "6100", amount: 500, method: "Bank", tax: "both", paidFrom: "1010" }];
+  ctx = run(D); bal = ctx.liveAccountBalances("all"); fin = ctx.storeFinance("all", null);
+  ok(Math.abs((bal["1010"] || 0) + 560) < 0.005, "cash expense takes 560.00 (500 + GST 25 + PST 35) out of the bank");
+  ok(Math.abs((bal["6100"] || 0) - 535) < 0.005, "expense cost includes non-recoverable PST (535.00)");
+  ok(Math.abs(fin.gstITC - 25) < 0.005, "GST on the expense is claimed as a 25.00 input tax credit");
+
+  // --- REGRESSION: money posted to a code missing from the chart must not vanish ---
+  D = base();
+  D.expenses = [{ date: "2026-08-05", category: "Custom", acct: "7777", amount: 300, method: "Bank", tax: "none", paidFrom: "1010" }];
+  ctx = run(D); bal = ctx.liveAccountBalances("all");
+  const shown = ctx.reportAccounts(bal);
+  ok(shown.some((a) => a.code === "7777" && a.unmapped), "unmapped account 7777 still appears in the reports");
+  let tdr = 0, tcr = 0;
+  shown.forEach((a) => { const b = bal[a.code] || 0; if (a.type === "Asset" || a.type === "Expense") tdr += b; else tcr += b; });
+  ok(Math.abs(tdr - tcr) < 0.02, "trial balance still balances with an unmapped account (dr " + tdr.toFixed(2) + " vs cr " + tcr.toFixed(2) + ")");
+
+  // --- REGRESSION: Income by Client must cover every sales channel ---
+  D = base();
+  D.clients = [{ id: "c1", name: "Acme", type: "Retail" }];
+  D.invoices = [SALE];
+  D.cashSales = [{ date: "2026-08-04", clientId: "c1", method: "Cash", subtotal: 200, gst: 10, pst: 14, total: 224, paid: 224, cogs: 80 }];
+  D.creditNotes = [CN({ subtotal: -30, gst: -1.5, pst: -2.1, total: -33.6, refund: 33.6, refundPaid: 33.6, clientId: "c1", items: [{ code: "A", qty: 1, price: 30, cost: 40 }] })];
+  ctx = run(D);
+  const cRows = ctx.clientRevenueRows("all", null);
+  const cTotal = cRows.reduce((s, r) => s + r.v, 0);
+  fin = ctx.storeFinance("all", null);
+  ok(Math.abs(cTotal - fin.revenue) < 0.02, "Income by Client ties to P&L revenue incl. register sales and returns (" + cTotal.toFixed(2) + " vs " + fin.revenue.toFixed(2) + ")");
+  ok(cRows.length === 1 && Math.abs(cRows[0].v - 270) < 0.02, "client row nets invoice 100 + register 200 − return 30 = 270.00");
+  // walk-in register sales are grouped, not dropped
+  D = base(); D.clients = [{ id: "c1", name: "Acme" }];
+  D.cashSales = [{ date: "2026-08-04", clientId: null, method: "Cash", subtotal: 75, gst: 0, pst: 0, total: 75, paid: 75, cogs: 30 }];
+  const wRows = run(D).clientRevenueRows("all", null);
+  ok(wRows.length === 1 && wRows[0].walkin && Math.abs(wRows[0].v - 75) < 0.005, "walk-in register sales appear as their own row (75.00)");
+
+  // --- the whole point: P&L must equal the ledger on every mix ---
+  const mixes = {
+    "sale": (x) => { x.invoices = [SALE]; },
+    "return": (x) => { x.invoices = [SALE]; x.creditNotes = [CN()]; },
+    "return + restocking fee": (x) => { x.invoices = [SALE]; x.creditNotes = [CN({ total: -102, restockingFee: 10, refund: 102, refundPaid: 102 })]; },
+    "defective": (x) => { x.invoices = [SALE]; x.creditNotes = [CN({ retDisp: "Defected" })];
+      x.defectiveProducts = [{ date: "2026-08-10", code: "A", qty: 1, costLoss: 40, ref: "CN1", kind: "defective" }]; },
+    "exchange": (x) => { x.invoices = [SALE]; x.creditNotes = [CN({ no: "EX1", type: "Exchange", subtotal: 30, gst: 1.5, pst: 2.1, total: 33.6, refund: 0, refundPaid: 0, collect: 33.6, exchangeItems: [{ code: "B", qty: 1, price: 130, cost: 55 }] })]; },
+    "register sale": (x) => { x.cashSales = [{ date: "2026-08-04", method: "Cash", subtotal: 50, gst: 2.5, pst: 3.5, total: 56, paid: 56, cogs: 20 }]; },
+    "register return + defective": (x) => { x.cashSales = [{ date: "2026-08-06", method: "Cash refund", subtotal: -80, gst: -4, pst: -5.6, total: -89.6, paid: -89.6, cogs: -30, defLoss: 30 }]; },
+    "write-off + cash expense": (x) => {
+      x.expenses = [{ date: "2026-08-05", category: "Rent", acct: "6100", amount: 500, method: "Bank", tax: "both", paidFrom: "1010" },
+                    { date: "2026-08-07", category: "Defective Stock", acct: "5100", amount: 120, method: "Stock adjustment", stockLoss: true, tax: "none" }]; },
+    "all of it together": (x) => {
+      x.invoices = [SALE];
+      x.creditNotes = [CN({ subtotal: -40, gst: -2, pst: -2.8, total: -34.8, restockingFee: 10, refund: 34.8, refundPaid: 34.8, items: [{ code: "A", qty: 1, price: 40, cost: 40 }] })];
+      x.cashSales = [{ date: "2026-08-04", method: "Cash", subtotal: 50, gst: 2.5, pst: 3.5, total: 56, paid: 56, cogs: 20 }];
+      x.expenses = [{ date: "2026-08-05", category: "Rent", acct: "6100", amount: 500, method: "Bank", tax: "both", paidFrom: "1010" },
+                    { date: "2026-08-07", category: "Defective Stock", acct: "5100", amount: 120, method: "Stock adjustment", stockLoss: true, tax: "none" }]; },
+  };
+  Object.entries(mixes).forEach(([name, build]) => {
+    const X = base(); build(X);
+    const c = run(X);
+    const f = c.storeFinance("all", null), b = c.liveAccountBalances("all");
+    const accts = c.reportAccounts(b);
+    const sum = (t) => accts.filter((a) => a.type === t).reduce((s, a) => s + (b[a.code] || 0), 0);
+    const ledgerNet = sum("Revenue") - sum("Expense");
+    ok(Math.abs(f.netIncome - ledgerNet) < 0.02,
+      "P&L ties to the ledger — " + name + " (P&L " + f.netIncome.toFixed(2) + " vs ledger " + ledgerNet.toFixed(2) + ")");
+  });
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -371,6 +522,7 @@ function testAccountingEngine() {
     testEditCell();
     testInventoryExport();
     testAccountingEngine();
+    testReturnsExchangesExpenses();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

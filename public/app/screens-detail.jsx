@@ -211,13 +211,22 @@ function InvoiceDetail({ no, go, pushToast }) {
       if (p.retDisp === "Inventory" && it) {
         it.stock = (it.stock || 0) + l.qty;
         // Net the item's sales history so per-item analytics stop counting
-        // units that came back to the shelf.
-        if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: -l.qty, price: l.price, disc: l.disc || 0, cost: it.cost || 0 });
+        // units that came back to the shelf. Cost is the ORIGINAL sale cost
+        // (snapshotted on the line) so the netting cancels the sale exactly.
+        if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: -l.qty, price: l.price, disc: l.disc || 0, cost: l.cost != null ? l.cost : (it.cost || 0) });
       } else if (p.retDisp === "Defected") {
         D.defectiveProducts.unshift({ date: D.today, code: l.code, name: l.desc, qty: l.qty, costLoss: +(((it ? it.cost : l.price * 0.5)) * l.qty).toFixed(2), reason: p.reason || "Returned defective", ref: cn.no, kind: "defective" });
       }
     });
-    (p.exchangeItems || []).forEach((l) => { if (l.code) { const it = D.inventory.find((x) => x.code === l.code); if (it) it.stock = (it.stock || 0) - l.qty; } });
+    // Replacement goods leave stock AND count as a sale of that item, so per-item
+    // analytics and the client's purchase history include what they walked out
+    // with (previously only the stock moved — the units vanished from history).
+    (p.exchangeItems || []).forEach((l) => {
+      if (!l.code || !(l.qty > 0)) return;
+      const it = D.inventory.find((x) => x.code === l.code);
+      if (it) it.stock = (it.stock || 0) - l.qty;
+      if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: l.qty, price: l.price || 0, disc: 0, cost: l.cost != null ? l.cost : (it ? (it.cost || 0) : 0) });
+    });
     // Restocking fee is income — post it so it shows in the Income Statement / profit.
     if (p.restockingFee > 0.005) {
       let acct = D.accounts.find((a) => a.code === "4200");
@@ -547,7 +556,10 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
   const exPick = (id, name) => { const h = catalog.find((c) => c.name === name); exUpd(id, h ? { desc: h.name, code: h.code || "", price: h.price } : { desc: name }); };
 
   function submit() {
-    const items = origLines.map((l, i) => ({ code: l.code, desc: l.desc, qty: qtys[i], price: l.price, disc: l.disc || 0 })).filter((l) => l.qty > 0);
+    // Snapshot the ORIGINAL line cost onto each returned line. Without it the
+    // books re-valued historical returns whenever an item's cost was edited
+    // later (reversing more/less COGS than was charged at the sale).
+    const items = origLines.map((l, i) => ({ code: l.code, desc: l.desc, qty: qtys[i], price: l.price, disc: l.disc || 0, cost: l.cost || 0 })).filter((l) => l.qty > 0);
     if (!items.length) return;
     onSubmit({
       mode, retDisp: disp, reason, items,
@@ -558,7 +570,13 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
       refundAccount: refundStatus === "unpaid" ? "" : refundAcctSel,
       collect: collect > 0.005 ? +collect.toFixed(2) : 0,
       collectAccount: refundAcctSel,
-      exchangeItems: mode === "Exchange" ? exItems.filter((l) => l.desc && l.qty > 0) : [],
+      // Replacement goods carry the cost they leave stock at, for the same reason.
+      exchangeItems: mode === "Exchange"
+        ? exItems.filter((l) => l.desc && l.qty > 0).map((l) => {
+            const it = l.code ? (D.inventory || []).find((x) => x.code === l.code) : null;
+            return Object.assign({}, l, { cost: l.cost != null ? l.cost : (it ? (it.cost || 0) : 0) });
+          })
+        : [],
     });
   }
 

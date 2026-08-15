@@ -2706,7 +2706,8 @@ function Expenses({ pushToast, store }) {
     D.expenses.unshift({
       id: "e" + Date.now(), companyId: tagStore, date: data.date, category, acct,
       desc: data.reason + " · " + data.lines.length + " item" + (data.lines.length === 1 ? "" : "s") + " · " + ref,
-      amount: +totalCost.toFixed(2), method: "Stock adjustment", tax: "none", sales: data.sales, receipt: "",
+      // Non-cash: the cost leaves INVENTORY (stock reduced above), not the bank.
+      amount: +totalCost.toFixed(2), method: "Stock adjustment", stockLoss: true, tax: "none", sales: data.sales, receipt: "",
     });
     pushToast && pushToast("Expense invoice " + ref + " recorded — " + fmt(totalCost) + " written off · inventory reduced");
     window.logAudit("POST", "Stock loss", "expenses", ref, category + " write-off " + fmt(totalCost) + " · " + data.lines.length + " item" + (data.lines.length === 1 ? "" : "s") + " · inventory reduced");
@@ -2741,7 +2742,9 @@ function Expenses({ pushToast, store }) {
       D.expenses.unshift({
         id: "e" + Date.now(), companyId: tagStore, date, category: cat, acct: catDef.acct,
         desc: (desc.trim() ? desc.trim() + " · " : "") + stockBuilt.length + " item" + (stockBuilt.length === 1 ? "" : "s") + " · " + ref,
-        amount: +stockCost.toFixed(2), method: "Stock adjustment", tax: "none", sales, receipt: "",
+        // stockLoss marks a non-cash expense: the cost comes OUT OF INVENTORY
+        // (stock was reduced above), so the ledger must not also credit cash/bank.
+        amount: +stockCost.toFixed(2), method: "Stock adjustment", stockLoss: true, tax: "none", sales, receipt: "",
       });
       pushToast && pushToast(cat + " written off — " + fmt(stockCost) + " · inventory reduced " + stockUnits + " unit" + (stockUnits === 1 ? "" : "s"));
       window.logAudit("POST", "Stock loss", "expenses", ref, cat + " write-off " + fmt(stockCost) + " · " + stockUnits + " unit" + (stockUnits === 1 ? "" : "s") + " · inventory reduced");

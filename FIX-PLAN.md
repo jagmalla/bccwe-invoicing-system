@@ -489,3 +489,65 @@ and "Custom" renamed to "Date Search".
 - [x] Harness → 82 checks green. New: recon keys distinct for identical lines + deterministic across
       recomputes; supplier-payables rows tie to the derived 2000 balance; range-overlap logic
       (adjacent months don't overlap, shared boundary day does).
+
+---
+
+## Deep audit: returns, exchanges, defective goods, expenses, reports (2026-08-15)
+
+Method: ran the REAL `screens-c.jsx` engine over synthetic books for each scenario and compared the
+P&L (`storeFinance`) against the ledger (`liveAccountBalances`) — a mismatch means the Income
+Statement and Balance Sheet disagree. **Four real bugs found and fixed; all are now regression-tested.**
+
+### Bug 1 — returns re-valued whenever an item's cost was edited  · HIGH  *(fixed)*
+`cnCosts()` valued returned/exchanged goods at the item's **current** cost, not the cost charged on
+the original sale. Editing a cost afterwards (now easy via the inline stock/cost editing) silently
+restated every past return: a unit sold at cost 40 and returned after the cost was changed to 60
+reversed **60** of COGS — inventing $20 of phantom loss per unit, forever, retroactively.
+*Fix:* the return modal snapshots the original line cost onto each returned line (and each
+replacement line); `cnCosts` prefers that snapshot and falls back to current cost only for records
+saved before snapshots existed. *Proven: COGS 0.00 after a cost edit (was −20.00).*
+
+### Bug 2 — stock write-offs wrongly took money out of the bank  · HIGH  *(fixed)*
+A defective/lost-stock write-off is a **non-cash** expense: the value leaves inventory. The engine
+credited cash/bank for the full amount anyway, so every write-off understated the bank balance by its
+value (a $200 write-off showed as $200 leaving the bank that never left).
+*Fix:* write-off records carry `stockLoss: true`; `isStockLossExpense()` also recognises legacy rows
+by their "Stock adjustment" method or a category flagged `stockLoss`. Both the engine and
+`ledgerLines` skip the cash credit. *Proven: bank 0.00 (was −200.00); the loss account still charged.*
+
+### Bug 3 — money posted to an account missing from the chart vanished  · MEDIUM  *(fixed)*
+Reports iterated the chart of accounts only, so a posting to a code not in it (deleted account,
+custom expense category with an unknown code, imported data) disappeared from the Trial Balance and
+Balance Sheet — and the Retained-Earnings plug mis-signed it as credit-normal, throwing the books out
+by *twice* the amount.
+*Fix:* new `reportAccounts()` adds any code carrying a balance but missing from the chart (labelled
+"not in chart", type inferred from the leading digit) to the Trial Balance and Balance Sheet; the
+engine's plug uses the same inference. *Proven: TB balanced with an orphan code (was out by 600.00).*
+
+### Bug 4 — Income by Client ignored register sales and returns  · MEDIUM  *(fixed)*
+The report summed invoices only. A client buying at the POS showed **nothing**, and returns were never
+deducted — the report disagreed with the P&L by the whole register + return volume.
+*Fix:* new shared `clientRevenueRows()` covers invoices + register sales + returns/exchanges, groups
+unattributed register sales as "Walk-in / cash customers", and is used by both the report and its
+Excel export (with a total row). *Proven: client total 270.00 = P&L revenue 270.00 (was 100.00).*
+
+### Verified CORRECT (no change needed)
+- Return to inventory fully reverses revenue and COGS; stock goes back on the shelf.
+- Defective return reclassifies the cost COGS → 5100 write-off, total expense unchanged (not doubled).
+- Exchange: returned unit reverses its COGS, replacement adds its own; revenue nets correctly.
+- Restocking fee is income (4200) and reduces the refund.
+- Register returns with mixed restock/defective lines classify correctly.
+- Cash expenses: PST folds into cost (not recoverable in BC), GST becomes an input tax credit, the
+  tax-inclusive amount leaves the bank.
+- Defective register (`defectiveProducts`) is never double-counted against the P&L.
+- Invoice open balance / status are return-aware (`invEffectiveTotal` − net paid).
+
+### Also fixed
+- Exchange replacements now record item sales, so the units the customer walked out with appear in
+  per-item analytics and the client's purchase history (previously only stock moved — they vanished).
+- Return netting in item history uses the original sale cost, so a return cancels its sale exactly.
+
+### Verification
+- [x] Harness → **109 checks green**, including a P&L↔ledger tie across 9 scenario mixes (sale,
+      return, return+fee, defective, exchange, register sale, register return+defective,
+      write-off+cash expense, and all of it together).
