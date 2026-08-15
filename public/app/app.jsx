@@ -251,7 +251,7 @@ function App() {
           {base === "exchange" && <QuickSale lockKind="Exchange" store={store} pushToast={pushToast} onRecorded={() => {}} />}
           {base === "expenses" && <Expenses pushToast={pushToast} store={store} />}
           {base === "accounting" && <Accounting store={store} pushToast={pushToast} />}
-          {base === "reports" && <Reports store={store} />}
+          {base === "reports" && <Reports store={store} pushToast={pushToast} />}
           {base === "mail" && <SentMail go={go} pushToast={pushToast} />}
           {base === "logs" && <AuditLog pushToast={pushToast} />}
           {base === "stores" && <Stores pushToast={pushToast} />}

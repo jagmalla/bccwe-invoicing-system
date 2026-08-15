@@ -363,10 +363,17 @@ by the engine (no way to post opening balances); group-name typos ("Liabilitys")
 - [x] Fake ledger rows removed — the ledger now lists REAL recorded journal lines for the account
       (register/POS/manual) with an honest note that invoice/expense activity posts straight to the
       derived balance.
-- [ ] Full per-account transaction detail (synthesized lines for invoices/payments/expenses/purchases
-      with running balance) — remaining Phase C work.
+- [x] Full per-account transaction detail: new `ledgerLines()` mirrors every engine posting as dated
+      lines — invoices/payments (per payment record), returns/refunds, expenses (with ITC), register/POS,
+      purchase orders, manual entries — with running balance, period filter and opening-balance row.
+      *(harness: lines TIE to the derived balance for every account except the documented 1300/3900.)*
 
-### Phase D — Periods & exports  *(pending)*
-- [ ] Wire Reports period chips (Month/Quarter/Year/Custom) into P&L, Tax report, Income-by-client.
-- [ ] Journal tab search + date filter + pagination.
-- [ ] Implement Reports "Excel/CSV" and "Export PDF" buttons.
+### Phase D — Periods & exports  *(done)*
+- [x] Reports period selector is REAL: This month / Last month / This year / All time / Custom filters the
+      P&L, Tax report and Income-by-client (`storeFinance(filter, range)`); BS/TB/Aging labeled as-of-today.
+- [x] Journal tab: search (id/memo/account) + show-more pagination.
+- [x] "Excel/CSV" exports the active report (P&L, BS, TB, Tax, Aging, Income-by-client) via exportXlsx;
+      "Export PDF" renders the on-screen report. Both were dead buttons.
+- [x] Bonus: AgingReport correctness (was still using stored status + raw total−paid and included order
+      invoices) → return-aware `invOpenBalance`, live `invStatus`, orders excluded — matching Unpaid.
+- [x] Income-by-client now pre-tax, order-excluding, period-aware — consistent with the P&L.

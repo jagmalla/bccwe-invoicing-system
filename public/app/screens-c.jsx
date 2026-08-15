@@ -13,10 +13,17 @@ function Accounting({ store, pushToast }) {
   const sf = store || "all";
   const [tab, setTab] = useState("coa");
   const [modal, setModal] = useState(null); // {type:"acct",acct?} | {type:"mje"} | {type:"opening"}
+  const [jq, setJq] = useState("");     // journal search
+  const [jshow, setJshow] = useState(10); // journal pagination
   const [, _r] = useState(0);
   const bump = () => _r((x) => x + 1);
   const isAdmin = !!(window.STORES && window.STORES.isAdmin());
   const toneFor = { Asset: "blue", Liability: "amber", Equity: "slate", Revenue: "green", Expense: "red" };
+  const jFiltered = (D.journal || []).filter((je) => {
+    if (!jq.trim()) return true;
+    const hay = (je.id + " " + je.memo + " " + (je.lines || []).map((l) => l.acct + " " + (l.name || "")).join(" ")).toLowerCase();
+    return hay.includes(jq.trim().toLowerCase());
+  });
 
   function saveAccount(data, original) {
     if (original) {
@@ -129,8 +136,12 @@ function Accounting({ store, pushToast }) {
 
       {tab === "journal" && (
         <Card pad={false}>
+          <div className="toolbar">
+            <div className="search"><Icon name="search" size={16} /><input placeholder="Search entry #, memo or account…" value={jq} onChange={(e) => { setJq(e.target.value); setJshow(10); }} /></div>
+            <span className="muted">{jFiltered.length} entr{jFiltered.length === 1 ? "y" : "ies"}</span>
+          </div>
           <div className="journal-list">
-            {D.journal.map((je) => {
+            {jFiltered.slice(0, jshow).map((je) => {
               const dr = je.lines.reduce((s, l) => s + l.dr, 0);
               const cr = je.lines.reduce((s, l) => s + l.cr, 0);
               return (
@@ -154,7 +165,12 @@ function Accounting({ store, pushToast }) {
                 </div>
               );
             })}
-            {!D.journal.length && <Empty icon="book" text="No journal entries yet — register sales, POS sales and manual entries appear here" />}
+            {!jFiltered.length && <Empty icon="book" text={jq ? "No entries match “" + jq + "”" : "No journal entries yet — register sales, POS sales and manual entries appear here"} />}
+            {jFiltered.length > jshow && (
+              <div style={{ padding: 14, textAlign: "center" }}>
+                <Btn variant="ghost" size="sm" onClick={() => setJshow((n) => n + 20)}>Show more ({jFiltered.length - jshow} remaining)</Btn>
+              </div>
+            )}
           </div>
         </Card>
       )}
@@ -172,19 +188,23 @@ function Ledger({ store }) {
   const D = BCCWE;
   const sf = store || "all";
   const [acct, setAcct] = useState("1010");
+  const [period, setPeriod] = useState("all");
+  const [from, setFrom] = useState(D.today.slice(0, 4) + "-01-01");
+  const [to, setTo] = useState(D.today);
+  const range = periodRange(period, from, to);
   const live = liveAccountBalances(sf);
-  const bal = live[acct] || 0;
-  // REAL journal activity touching this account (register, POS, manual entries).
-  // The old version rendered four hard-coded fake rows and back-solved a fake
-  // running balance — pure fiction on real data.
-  const rows = [];
-  (D.journal || []).forEach((je) => {
-    (je.lines || []).forEach((l) => {
-      if (l.acct !== acct) return;
-      rows.push({ id: je.id, date: je.date, manual: !!je.manual, memo: je.memo, dr: l.dr || 0, cr: l.cr || 0 });
-    });
-  });
-  rows.sort((x, y) => String(y.date).localeCompare(String(x.date)) || String(y.id).localeCompare(String(x.id)));
+  const a = D.accounts.find((x) => x.code === acct) || {};
+  const debitNormal = a.type === "Asset" || a.type === "Expense";
+  const special = acct === "1300" || acct === "3900"; // snapshot / plug — no flow lines
+  const all = (ledgerLines(sf)[acct] || []);
+  const signed = (l) => (debitNormal ? l.dr - l.cr : l.cr - l.dr);
+  const opening = all.filter((l) => l.date < range.from).reduce((s, l) => s + signed(l), 0);
+  const rows = all.filter((l) => inRange(l.date, range));
+  let run = opening;
+  const view = rows.map((l) => { run += signed(l); return { ...l, run }; });
+  const linesTotal = all.reduce((s, l) => s + signed(l), 0);
+  const derived = live[acct] || 0;
+  const tie = Math.abs(linesTotal - derived) < 0.02;
 
   return (
     <Card pad={false}>
@@ -194,26 +214,44 @@ function Ledger({ store }) {
             {D.accounts.map((x) => <option key={x.code} value={x.code}>{x.code} · {x.name}</option>)}
           </select>
         </Field>
-        <div className="ledger-bal">Current balance (derived) <strong className="mono">{fmt(bal)}</strong></div>
+        <PeriodFilter period={period} setPeriod={setPeriod} from={from} to={to} setFrom={setFrom} setTo={setTo} />
+        <div className="ledger-bal">Current balance <strong className="mono">{fmt(derived)}</strong></div>
       </div>
-      <div className="inline-note" style={{ margin: "0 16px" }}>
-        <Icon name="alert" size={15} /> Lines below are recorded journal entries (register sales, POS and manual entries).
-        Invoice, payment, expense and purchase activity posts straight into the derived balance shown above without journal lines.
-      </div>
+      {special && (
+        <div className="inline-note" style={{ margin: "0 16px" }}>
+          <Icon name="alert" size={15} /> {acct === "1300"
+            ? "Inventory is valued as a live stock snapshot (units × cost) — only manual valuation adjustments appear as lines."
+            : "Retained Earnings accumulates net income from all activity — only manual entries appear as lines."}
+        </div>
+      )}
+      {!special && !tie && (
+        <div className="inline-note" style={{ margin: "0 16px" }}>
+          <Icon name="alert" size={15} /> Lines total {fmt(linesTotal)} vs derived balance {fmt(derived)} — small differences come from rounding on legacy records.
+        </div>
+      )}
       <table className="data-table">
-        <thead><tr><th>Date</th><th>Entry</th><th>Memo</th><th className="r">Debit</th><th className="r">Credit</th></tr></thead>
+        <thead><tr><th>Date</th><th>Memo</th><th className="r">Debit</th><th className="r">Credit</th><th className="r">Running balance</th></tr></thead>
         <tbody>
-          {rows.map((r, i) => (
+          {period !== "all" && (
+            <tr><td className="muted">{shortDate(range.from)}</td><td className="muted">Opening balance</td><td className="r mono">—</td><td className="r mono">—</td><td className="r mono strong">{fmt(opening)}</td></tr>
+          )}
+          {view.map((r, i) => (
             <tr key={i}>
               <td className="muted">{shortDate(r.date)}</td>
-              <td className="mono">{r.id}{r.manual ? " · manual" : ""}</td>
               <td>{r.memo}</td>
-              <td className="r mono">{r.dr ? fmtPlain(r.dr) : "—"}</td>
-              <td className="r mono">{r.cr ? fmtPlain(r.cr) : "—"}</td>
+              <td className="r mono">{r.dr > 0.005 ? fmtPlain(r.dr) : "—"}</td>
+              <td className="r mono">{r.cr > 0.005 ? fmtPlain(r.cr) : "—"}</td>
+              <td className="r mono strong">{fmt(r.run)}</td>
             </tr>
           ))}
-          {!rows.length && <tr><td colSpan="5"><Empty icon="book" text="No journal lines recorded for this account yet" /></td></tr>}
+          {!view.length && <tr><td colSpan="5"><Empty icon="book" text={"No activity for this account" + (period !== "all" ? " in " + range.label : "")} /></td></tr>}
         </tbody>
+        {view.length > 0 && (
+          <tfoot><tr><td /><td>Period activity ({view.length} line{view.length === 1 ? "" : "s"})</td>
+            <td className="r mono">{fmtPlain(view.reduce((s, l) => s + l.dr, 0))}</td>
+            <td className="r mono">{fmtPlain(view.reduce((s, l) => s + l.cr, 0))}</td>
+            <td className="r mono strong">{fmt(run)}</td></tr></tfoot>
+        )}
       </table>
     </Card>
   );
@@ -423,11 +461,14 @@ function cnCosts(cn) {
   });
   return { restock, defect, exchangeOut };
 }
-function storeFinance(filter) {
+function storeFinance(filter, range) {
   const D = BCCWE;
+  // Optional `range` {from,to} — when given, only records dated inside it count
+  // (powers the Month/Quarter/Year period chips on Reports).
+  const inR = (d) => !range || inRange(d || "", range);
   let revenue = 0, cogs = 0, gst = 0, pst = 0, restock = 0, writeOff = 0, gstITC = 0;
   (D.invoices || []).forEach((i) => {
-    if (!storeMatch(i, filter)) return;
+    if (!storeMatch(i, filter) || !inR(i.date)) return;
     if (i.kind === "order") return; // order invoices aren't sales yet — no revenue
     // Net-of-tax consideration = subtotal − invoice-level discount + charges.
     // Using i.subtotal alone overstated revenue by every discount and dropped
@@ -437,7 +478,7 @@ function storeFinance(filter) {
     (deriveLines(i) || []).forEach((l) => { cogs += (l.qty || 0) * (l.cost || 0); });
   });
   (D.creditNotes || []).forEach((cn) => {
-    if (!cnMatch(cn, filter)) return;
+    if (!cnMatch(cn, filter) || !inR(cn.date)) return;
     revenue += cn.subtotal || 0;   // negative on returns → reduces revenue
     gst += cn.gst || 0; pst += cn.pst || 0;
     restock += cn.restockingFee || 0;
@@ -446,7 +487,7 @@ function storeFinance(filter) {
     writeOff += cc.defect;                            // defective cost reclassified to 5100
   });
   (D.cashSales || []).forEach((s) => {
-    if (!storeMatch(s, filter)) return;
+    if (!storeMatch(s, filter) || !inR(s.date)) return;
     revenue += s.subtotal != null ? s.subtotal : (s.total || 0);
     gst += s.gst || 0; pst += s.pst || 0; restock += s.restockingFee || 0;
     cogs += (s.cogs || 0) - (s.defLoss || 0); // defective units reclassify out of COGS…
@@ -454,7 +495,7 @@ function storeFinance(filter) {
   });
   const opexByName = {}; let opex = 0;
   (D.expenses || []).forEach((e) => {
-    if (!storeMatch(e, filter)) return;
+    if (!storeMatch(e, filter) || !inR(e.date)) return;
     // Expense amounts are entered PRE-tax (see seed JE-2049). BC PST on inputs
     // is not recoverable → it is part of the cost; GST paid is an input tax
     // credit claimed against GST collected (shown on the tax report).
@@ -668,12 +709,147 @@ function liveAccountBalances(filter) {
   return bal;
 }
 
+/* ---------------- Per-account ledger detail ---------------- */
+// The SAME postings liveAccountBalances makes, emitted as dated lines so the
+// General Ledger shows real activity with a running balance that TIES to the
+// derived figure. Keep the two functions in lockstep when editing either.
+// Exceptions that can't tie: 1300 (stock snapshot) and 3900 (the plug) — only
+// their manual-entry lines appear.
+function ledgerLines(filter) {
+  const D = BCCWE;
+  const out = {};
+  const push = (code, date, memo, dr, cr) => {
+    if (!code) return;
+    dr = dr || 0; cr = cr || 0;
+    if (Math.abs(dr) < 0.005 && Math.abs(cr) < 0.005) return;
+    (out[code] = out[code] || []).push({ date: date || "", memo, dr, cr });
+  };
+  // signed helper: positive → one side, negative → the other
+  const pushS = (code, date, memo, amt, side) => {
+    if (amt >= 0) { side === "dr" ? push(code, date, memo, amt, 0) : push(code, date, memo, 0, amt); }
+    else { side === "dr" ? push(code, date, memo, 0, -amt) : push(code, date, memo, -amt, 0); }
+  };
+  const payByInv = {};
+  (D.payments || []).forEach((p) => { (payByInv[p.inv] = payByInv[p.inv] || []).push(p); });
+  (D.invoices || []).forEach((i) => {
+    if (!storeMatch(i, filter)) return;
+    if (i.kind === "order") {
+      const dep = i.paid || 0;
+      push(i.payMethod === "Cash" ? "1000" : "1010", i.date, "Deposit — order " + i.no, dep, 0);
+      push("2200", i.date, "Customer deposit — " + i.no, 0, dep);
+      return;
+    }
+    let cogs = 0, goods = 0, svc = 0;
+    (deriveLines(i) || []).forEach((l) => {
+      cogs += (l.qty || 0) * (l.cost || 0);
+      const lt = (l.qty || 0) * (l.price || 0) * (1 - ((l.disc || 0) / 100));
+      if (String(l.code || "").startsWith("SVC")) svc += lt; else goods += lt;
+    });
+    const cl = (D.clients || []).find((c) => c.id === i.clientId);
+    const sub = i.subtotal || 0;
+    const lineSum = goods + svc;
+    const goodsRev = lineSum > 0 ? sub * (goods / lineSum) : sub;
+    const svcRev = sub - goodsRev;
+    const otherRev = (i.total || 0) - sub - (i.gst || 0) - (i.pst || 0);
+    pushS(cl && cl.type === "Wholesale" ? "4010" : "4000", i.date, "Invoice " + i.no, goodsRev + otherRev, "cr");
+    pushS("4100", i.date, "Invoice " + i.no + " — services", svcRev, "cr");
+    push("5000", i.date, "COGS — " + i.no, cogs, 0);
+    push("2100", i.date, "GST — " + i.no, 0, i.gst || 0);
+    push("2110", i.date, "PST — " + i.no, 0, i.pst || 0);
+    push("1200", i.date, "Invoice " + i.no, i.total || 0, 0);
+    // Collected money: per payment record, remainder at the invoice date. A/R
+    // credit is capped at the invoice total; any excess is a customer credit
+    // (2200) — exactly the engine's clamps.
+    const cap = i.paid || 0;
+    let routed = 0, arLeft = i.total || 0;
+    const applyPay = (amt, date, acct, memo) => {
+      if (amt <= 0) return;
+      push(acct, date, memo, amt, 0);
+      const arCr = Math.min(amt, arLeft); arLeft -= arCr;
+      push("1200", date, memo, 0, arCr);
+      if (amt - arCr > 0.005) push("2200", date, "Customer credit — " + i.no, 0, amt - arCr);
+    };
+    (payByInv[i.no] || []).forEach((p) => {
+      const left = cap - routed; if (left <= 0) return;
+      const amt = Math.min(p.amount || 0, left);
+      applyPay(amt, p.date || i.date, p.acct === "1000" ? "1000" : "1010", "Payment — " + i.no);
+      routed += amt;
+    });
+    if (cap - routed > 0.005) applyPay(cap - routed, i.date, i.payMethod === "Cash" ? "1000" : "1010", "Payment — " + i.no);
+  });
+  (D.creditNotes || []).forEach((cn) => {
+    if (!cnMatch(cn, filter)) return;
+    const lbl = (cn.type === "Exchange" ? "Exchange " : "Return ") + cn.no;
+    pushS("4000", cn.date, lbl, cn.subtotal || 0, "cr");
+    pushS("2100", cn.date, "GST — " + cn.no, cn.gst || 0, "cr");
+    pushS("2110", cn.date, "PST — " + cn.no, cn.pst || 0, "cr");
+    push("4200", cn.date, "Restocking fee — " + cn.no, 0, cn.restockingFee || 0);
+    const rPaid = cn.refundPaid != null ? cn.refundPaid : (cn.refund || 0);
+    push(cn.refundAccount || "1010", cn.date, "Refund — " + cn.no, 0, rPaid);
+    const cc = cnCosts(cn);
+    pushS("5000", cn.date, "COGS — " + cn.no, cc.exchangeOut - cc.restock - cc.defect, "dr");
+    push("5100", cn.date, "Defective write-off — " + cn.no, cc.defect, 0);
+  });
+  (D.expenses || []).forEach((e) => {
+    if (!storeMatch(e, filter)) return;
+    const m = (D.TAX && D.TAX.modes && D.TAX.modes[e.tax]) || null;
+    const gstPaid = m ? (e.amount || 0) * (m.gst || 0) : 0;
+    const pstPaid = m ? (e.amount || 0) * (m.pst || 0) : 0;
+    const lbl = "Expense — " + (e.desc || e.category || "");
+    push(e.acct || "6900", e.date, lbl, (e.amount || 0) + pstPaid, 0);
+    push("2100", e.date, "GST input credit — " + (e.category || ""), gstPaid, 0);
+    push(e.paidFrom || "1010", e.date, lbl, 0, (e.amount || 0) + gstPaid + pstPaid);
+  });
+  (D.cashSales || []).forEach((s) => {
+    if (!storeMatch(s, filter)) return;
+    const lbl = (s.kind || "Sale") + " (register)" + (s.item ? " — " + s.item : "");
+    const collected = s.paid != null ? s.paid : (s.total || 0);
+    pushS(String(s.method || "").toLowerCase().indexOf("cash") === 0 ? "1000" : "1010", s.date, lbl, collected, "dr");
+    push("1200", s.date, lbl + " · on account", s.owed || 0, 0);
+    if (s.subtotal != null) {
+      pushS("4000", s.date, lbl, s.subtotal, "cr");
+      pushS("2100", s.date, "GST — register", s.gst || 0, "cr");
+      pushS("2110", s.date, "PST — register", s.pst || 0, "cr");
+      push("4200", s.date, "Restocking fee — register", 0, s.restockingFee || 0);
+    } else {
+      pushS("4000", s.date, lbl, s.total || 0, "cr");
+    }
+    pushS("5000", s.date, "COGS — register", (s.cogs || 0) - (s.defLoss || 0), "dr");
+    push("5100", s.date, "Defective write-off — register", s.defLoss || 0, 0);
+  });
+  (D.purchaseOrders || []).forEach((po) => {
+    if (!storeMatch(po, filter)) return;
+    if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
+    const ref = po.ref || po.po;
+    const pay = (po.payment && +po.payment.amount) || 0;
+    if (pay > 0) {
+      push((po.payment && po.payment.account) === "1000" ? "1000" : "1010", po.date, "Supplier payment — " + ref, 0, pay);
+      push("2000", po.date, "Supplier payment — " + ref, pay, 0);
+    }
+    let recvVal = 0;
+    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
+    push("2000", po.date, "Goods received — " + ref, 0, recvVal);
+  });
+  (D.journal || []).forEach((je) => {
+    if (!je || !je.manual) return;
+    (je.lines || []).forEach((l) => push(l.acct, je.date, "Manual — " + je.memo, l.dr || 0, l.cr || 0));
+  });
+  Object.keys(out).forEach((code) => out[code].sort((a, b) => String(a.date).localeCompare(String(b.date))));
+  return out;
+}
+
 /* ---------------- Reports ---------------- */
-function Reports({ store }) {
+function Reports({ store, pushToast }) {
   const D = BCCWE;
   const sf = store || "all";
   const [report, setReport] = useState("pl");
-  const [range, setRange] = useState("month");
+  // The period ACTUALLY filters now (previously the chips were decorative).
+  const [period, setPeriod] = useState("all");
+  const [from, setFrom] = useState(D.today.slice(0, 4) + "-01-01");
+  const [to, setTo] = useState(D.today);
+  const range = periodRange(period, from, to);
+  const dated = report === "pl" || report === "tax" || report === "client"; // BS/TB/Aging are as-of-today
 
   const reports = [
     { id: "pl", name: "Income Statement (P&L)", ico: "report" },
@@ -684,12 +860,93 @@ function Reports({ store }) {
     { id: "client", name: "Income by Client", ico: "people" },
   ];
 
+  function buildReportExport() {
+    const money = (n) => +((n || 0)).toFixed(2);
+    const safeLbl = String(dated ? range.label : "as of " + BCCWE.today).replace(/[^\w-]+/g, "-");
+    if (report === "pl") {
+      const f = storeFinance(sf, dated ? range : null);
+      const rows = [
+        { item: "Sales revenue (net of returns)", amount: money(f.revenue) },
+        { item: "Restocking fee income", amount: money(f.restock) },
+        { item: "Total revenue", amount: money(f.revenue + f.restock) },
+        { item: "Cost of goods sold", amount: money(f.cogs) },
+        { item: "Inventory written off", amount: money(f.writeOff) },
+        { item: "Gross profit", amount: money(f.grossProfit + f.restock - f.writeOff) },
+        ...Object.keys(f.opexByName).sort().map((k) => ({ item: "Expense — " + k, amount: money(f.opexByName[k]) })),
+        { item: "Total expenses", amount: money(f.opex) },
+        { item: "NET INCOME", amount: money(f.netIncome) },
+      ];
+      return { filename: "BCCWE-IncomeStatement-" + safeLbl, sheet: "Income Statement",
+        cols: [{ key: "item", label: "Item", type: "text" }, { key: "amount", label: "Amount (CAD)", type: "number" }],
+        data: rows, opts: { title: "BCCWE — Income Statement", subtitle: storeLabel(sf) + " · " + range.label } };
+    }
+    if (report === "bs" || report === "tb") {
+      const live = liveAccountBalances(sf);
+      const rows = (D.accounts || []).map((a) => {
+        const b = live[a.code] || 0;
+        const dn = a.type === "Asset" || a.type === "Expense";
+        return { code: a.code, name: a.name, type: a.type, balance: money(b), debit: dn ? money(b) : 0, credit: dn ? 0 : money(b) };
+      }).filter((r) => report === "tb" || Math.abs(r.balance) > 0.005);
+      return report === "tb"
+        ? { filename: "BCCWE-TrialBalance-" + safeLbl, sheet: "Trial Balance",
+            cols: [{ key: "code", label: "Code", type: "text" }, { key: "name", label: "Account", type: "text" }, { key: "debit", label: "Debit", type: "number" }, { key: "credit", label: "Credit", type: "number" }],
+            data: rows, opts: { title: "BCCWE — Trial Balance", subtitle: storeLabel(sf) + " · as of " + BCCWE.today } }
+        : { filename: "BCCWE-BalanceSheet-" + safeLbl, sheet: "Balance Sheet",
+            cols: [{ key: "type", label: "Section", type: "text" }, { key: "code", label: "Code", type: "text" }, { key: "name", label: "Account", type: "text" }, { key: "balance", label: "Balance", type: "number" }],
+            data: rows.filter((r) => ["Asset", "Liability", "Equity"].includes(r.type)),
+            opts: { title: "BCCWE — Balance Sheet", subtitle: storeLabel(sf) + " · as of " + BCCWE.today } };
+    }
+    if (report === "tax") {
+      const f = storeFinance(sf, dated ? range : null);
+      return { filename: "BCCWE-TaxRemittance-" + safeLbl, sheet: "GST-PST",
+        cols: [{ key: "item", label: "Item", type: "text" }, { key: "amount", label: "Amount (CAD)", type: "number" }],
+        data: [
+          { item: "GST collected on sales (net of returns)", amount: money(f.gst) },
+          { item: "Less: GST input tax credits (expenses)", amount: money(-f.gstITC) },
+          { item: "Net GST due", amount: money(f.gst - f.gstITC) },
+          { item: "PST collected", amount: money(f.pst) },
+          { item: "TOTAL REMITTANCE DUE", amount: money(f.gst - f.gstITC + f.pst) },
+        ], opts: { title: "BCCWE — GST/PST Remittance", subtitle: storeLabel(sf) + " · " + range.label } };
+    }
+    if (report === "aging") {
+      const open = (D.invoices || []).filter((i) => i.kind !== "order" && invStatus(i) !== "Paid" && invOpenBalance(i) > 0.005 && storeMatch(i, sf));
+      return { filename: "BCCWE-ARAging-" + safeLbl, sheet: "A-R Aging",
+        cols: [{ key: "no", label: "Invoice", type: "text" }, { key: "client", label: "Client", type: "text" }, { key: "due", label: "Due", type: "text" }, { key: "balance", label: "Balance", type: "number" }, { key: "status", label: "Status", type: "text" }],
+        data: open.map((i) => ({ no: i.no, client: clientName(i.clientId), due: i.due || "", balance: money(invOpenBalance(i)), status: invStatus(i) })),
+        opts: { title: "BCCWE — A/R Aging", subtitle: storeLabel(sf) + " · as of " + BCCWE.today } };
+    }
+    if (report === "client") {
+      const map = {};
+      (D.invoices || []).forEach((i) => { if (i.kind === "order" || !storeMatch(i, sf) || (dated && !inRange(i.date || "", range))) return; map[i.clientId] = (map[i.clientId] || 0) + ((i.total || 0) - (i.gst || 0) - (i.pst || 0)); });
+      return { filename: "BCCWE-IncomeByClient-" + safeLbl, sheet: "Income by Client",
+        cols: [{ key: "client", label: "Client", type: "text" }, { key: "revenue", label: "Revenue (pre-tax)", type: "number" }],
+        data: Object.entries(map).map(([id, v]) => ({ client: clientName(id), revenue: money(v) })).sort((a, b) => b.revenue - a.revenue),
+        opts: { title: "BCCWE — Income by Client", subtitle: storeLabel(sf) + " · " + range.label } };
+    }
+    return null;
+  }
+  function exportExcel() {
+    const s = buildReportExport();
+    if (!s) return;
+    exportXlsx(s.filename, s.sheet, s.cols, s.data, s.opts);
+    window.logDownload && window.logDownload({ kind: "XLSX", file: s.filename + ".xlsx" });
+    pushToast && pushToast("Exported " + s.filename + ".xlsx");
+  }
+  function exportPdf() {
+    const el = document.querySelector(".report-body");
+    if (!el || !window.downloadInvoicePdf) return;
+    const name = "BCCWE-" + report + "-report.pdf";
+    window.logDownload && window.logDownload({ kind: "PDF", file: name });
+    pushToast && pushToast("Generating " + name + "…");
+    window.downloadInvoicePdf(el, name, (r) => { pushToast && pushToast(r === "fallback" ? "Use “Save as PDF” in the print dialog" : name + " downloaded"); });
+  }
+
   return (
     <div>
       <PageHead title="Reports" sub={"Financial statements · " + storeLabel(sf) + " · export to PDF or Excel"}
         actions={<>
-          <Btn variant="ghost" icon="download">Excel / CSV</Btn>
-          <Btn variant="primary" icon="download">Export PDF</Btn>
+          <Btn variant="ghost" icon="download" onClick={exportExcel}>Excel / CSV</Btn>
+          <Btn variant="primary" icon="download" onClick={exportPdf}>Export PDF</Btn>
         </>} />
 
       <div className="reports-layout">
@@ -703,18 +960,18 @@ function Reports({ store }) {
 
         <Card pad={false} className="report-pane">
           <div className="report-bar">
-            <div className="seg-filters">
-              {["month", "quarter", "year", "custom"].map((r) => <button key={r} className={"chip" + (range === r ? " on" : "")} onClick={() => setRange(r)}>{r[0].toUpperCase() + r.slice(1)}</button>)}
-            </div>
+            {dated
+              ? <PeriodFilter period={period} setPeriod={setPeriod} from={from} to={to} setFrom={setFrom} setTo={setTo} />
+              : <span className="muted">As of {shortDate(BCCWE.today)}</span>}
             <span className="muted">{storeLabel(sf)}</span>
           </div>
           <div className="report-body">
-            {report === "pl" && <PLReport store={sf} />}
+            {report === "pl" && <PLReport store={sf} range={range} />}
             {report === "bs" && <BalanceSheet store={sf} />}
             {report === "tb" && <TrialBalance store={sf} />}
-            {report === "tax" && <TaxReport store={sf} />}
+            {report === "tax" && <TaxReport store={sf} range={range} />}
             {report === "aging" && <AgingReport store={sf} />}
-            {report === "client" && <ClientReport store={sf} />}
+            {report === "client" && <ClientReport store={sf} range={range} />}
           </div>
         </Card>
       </div>
@@ -730,13 +987,13 @@ function StatementRow({ label, value, bold, indent, total, neg }) {
   );
 }
 
-function PLReport({ store }) {
+function PLReport({ store, range }) {
   const sf = store || "all";
-  const f = storeFinance(sf);
+  const f = storeFinance(sf, range);
   const cats = Object.keys(f.opexByName).filter((k) => Math.abs(f.opexByName[k]) > 0.005).sort();
   return (
     <div className="statement">
-      <h3 className="stmt-title">Income Statement — {storeLabel(sf)}</h3>
+      <h3 className="stmt-title">Income Statement — {storeLabel(sf)}{range ? " · " + range.label : ""}</h3>
       <div className="stmt-sec">Revenue</div>
       <StatementRow label="Sales revenue (net of returns)" value={fmt(f.revenue)} indent />
       {f.restock > 0.005 && <StatementRow label="Restocking fee income" value={fmt(f.restock)} indent />}
@@ -825,12 +1082,12 @@ function TrialBalance({ store }) {
   );
 }
 
-function TaxReport({ store }) {
+function TaxReport({ store, range }) {
   const sf = store || "all";
-  const f = storeFinance(sf);
+  const f = storeFinance(sf, range);
   return (
     <div className="statement">
-      <h3 className="stmt-title">GST / PST Remittance — {storeLabel(sf)}</h3>
+      <h3 className="stmt-title">GST / PST Remittance — {storeLabel(sf)}{range ? " · " + range.label : ""}</h3>
       <div className="stmt-sec">GST</div>
       <StatementRow label="GST collected on sales (net of returns)" value={fmt(f.gst)} indent />
       {f.gstITC > 0.005 && <StatementRow label="Less: GST paid on expenses (input tax credits)" value={"−" + fmt(f.gstITC)} indent neg />}
@@ -849,9 +1106,11 @@ function AgingReport({ store }) {
   const [sort, setSort] = useState("age_desc");
   const buckets = { "Current": 0, "1–30": 0, "31–60": 0, "61–90": 0, "90+": 0 };
   const today = new Date(D.today);
-  const open = D.invoices.filter((i) => i.status !== "Paid" && storeMatch(i, sf));
+  // Return-aware open balance, live status, and no order (deposit) invoices —
+  // this report previously trusted the stored status and raw total−paid.
+  const open = D.invoices.filter((i) => i.kind !== "order" && invStatus(i) !== "Paid" && invOpenBalance(i) > 0.005 && storeMatch(i, sf));
   open.forEach((i) => {
-    const bal = i.total - i.paid;
+    const bal = invOpenBalance(i);
     const age = Math.floor((today - new Date(i.due)) / 86400000);
     if (age <= 0) buckets["Current"] += bal;
     else if (age <= 30) buckets["1–30"] += bal;
@@ -861,7 +1120,7 @@ function AgingReport({ store }) {
   });
   const agingSorts = {
     age_desc: { label: "Age — oldest first", get: (i) => today - new Date(i.due), dir: "desc" },
-    balance_desc: { label: "Balance — high to low", get: (i) => i.total - i.paid, dir: "desc" },
+    balance_desc: { label: "Balance — high to low", get: (i) => invOpenBalance(i), dir: "desc" },
     due_asc: { label: "Due date — earliest", get: (i) => new Date(i.due).getTime(), dir: "asc" },
     client_asc: { label: "Client — A to Z", get: (i) => clientName(i.clientId), dir: "asc" },
   };
@@ -879,18 +1138,23 @@ function AgingReport({ store }) {
       </div>
       <table className="data-table">
         <thead><tr><th>Invoice</th><th>Client</th><th>Due</th><th className="r">Balance</th><th>Status</th></tr></thead>
-        <tbody>{openRows.map((i) => <tr key={i.no}><td className="mono">{i.no}</td><td>{clientName(i.clientId)}</td><td className="muted">{shortDate(i.due)}</td><td className="r mono">{fmt(i.total - i.paid)}</td><td><Badge tone={statusTone(i.status)} dot>{i.status}</Badge></td></tr>)}</tbody>
+        <tbody>{openRows.map((i) => <tr key={i.no}><td className="mono">{i.no}</td><td>{clientName(i.clientId)}</td><td className="muted">{shortDate(i.due)}</td><td className="r mono">{fmt(invOpenBalance(i))}</td><td><Badge tone={statusTone(invStatus(i))} dot>{invStatus(i)}</Badge></td></tr>)}</tbody>
       </table>
     </div>
   );
 }
 
-function ClientReport({ store }) {
+function ClientReport({ store, range }) {
   const D = BCCWE;
   const sf = store || "all";
   const [sort, setSort] = useState("value_desc");
   const map = {};
-  D.invoices.forEach((i) => { if (!storeMatch(i, sf)) return; map[i.clientId] = (map[i.clientId] || 0) + i.subtotal; });
+  // Pre-tax revenue, orders excluded, period-aware — consistent with the P&L.
+  D.invoices.forEach((i) => {
+    if (i.kind === "order" || !storeMatch(i, sf)) return;
+    if (range && !inRange(i.date || "", range)) return;
+    map[i.clientId] = (map[i.clientId] || 0) + ((i.total || 0) - (i.gst || 0) - (i.pst || 0));
+  });
   const clientReportSorts = {
     value_desc: { label: "Revenue — high to low", get: (r) => r.v, dir: "desc" },
     value_asc: { label: "Revenue — low to high", get: (r) => r.v, dir: "asc" },
