@@ -55,19 +55,27 @@ function ClientShop({ pushToast, go }) {
 
   async function checkout() {
     if (!cart.length || !clientId) return;
-    const no = "ORD-" + (D.nextOrderNo || 1000);
+    // Server-side atomic order number; local counter only as offline fallback.
+    let no = "ORD-" + (D.nextOrderNo || 1000);
+    const alloc = window.allocateNumber ? await window.allocateNumber("order") : null;
+    if (alloc) { no = alloc.no; if (alloc.next) D.nextOrderNo = Math.max(D.nextOrderNo || 0, alloc.next); }
+    let _g = 0;
+    while (D.orders.some((o) => o.id === no) && _g++ < 500) {
+      const m = /^(.*?)(\d+)$/.exec(no);
+      no = m ? m[1] + (parseInt(m[2], 10) + 1) : no + "-2";
+    }
     const order = {
       id: no, clientId, placed: D.today, portal: true, paid: false, status: "Ordering", tracking: "",
       note: "Placed via client portal",
       lines: cart.map((l) => ({ code: l.code, name: l.name, price: l.price, qtyOrdered: l.qty, qtyReceived: 0 })),
     };
     D.orders.unshift(order);
-    D.nextOrderNo = (D.nextOrderNo || 1000) + 1;
+    if (!alloc) D.nextOrderNo = (D.nextOrderNo || 1000) + 1;
     window.logAudit("CREATE", "Order", "orders", no, "Placed order " + no + " · " + cartUnits + " unit" + (cartUnits === 1 ? "" : "s") + " · " + clientName(clientId));
     const ok = window.persistNow ? await window.persistNow("orders") : true;
     if (!ok) {
       D.orders = D.orders.filter((o) => o !== order);
-      D.nextOrderNo = (D.nextOrderNo || 1001) - 1;
+      if (!alloc) D.nextOrderNo = (D.nextOrderNo || 1001) - 1; // server-allocated numbers stay consumed (gap, never duplicate)
       pushToast && pushToast("Couldn't place the order — no connection. Your cart is kept; please try again.");
       return;
     }

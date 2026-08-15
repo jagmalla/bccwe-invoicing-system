@@ -1398,12 +1398,19 @@
         }
       });
       _pendingCollections = {};
+      var sentJson = {};
+      Object.keys(toSave).forEach(function (n) { try { sentJson[n] = JSON.stringify(toSave[n]); } catch (e) {} });
       fetch("/api/save-bulk", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toSave),
+        body: "{" + Object.keys(sentJson).map(function (n) { return JSON.stringify(n) + ":" + sentJson[n]; }).join(",") + "}",
       }).then(function (res) {
-        if (res && res.ok) return;
+        if (res && res.ok) {
+          // Mark exactly what was sent as confirmed so the autosave net doesn't
+          // re-send these collections unchanged.
+          Object.keys(sentJson).forEach(function (n) { _lastSaved[n] = sentJson[n]; });
+          return;
+        }
         // HTTP failure resolves (not rejects) — previously a 401/500 here was
         // silently swallowed and the data was simply never saved. Re-mark the
         // collections dirty (the autosave net also retries within 2s).
@@ -1437,10 +1444,14 @@
     // persistNow would roll back memory while the DB kept the "failed" write
     // (phantom records + duplicate numbers on retry).
     _saveLock++;
+    var sentJson = {};
+    Object.keys(toSave).forEach(function (n) { try { sentJson[n] = JSON.stringify(toSave[n]); } catch (e) {} });
     return fetch("/api/save-bulk", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(toSave),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: "{" + Object.keys(sentJson).map(function (n) { return JSON.stringify(n) + ":" + sentJson[n]; }).join(",") + "}",
     }).then(function (r) {
       _saveLock = Math.max(0, _saveLock - 1);
+      if (r && r.ok) Object.keys(sentJson).forEach(function (n) { _lastSaved[n] = sentJson[n]; });
       if (r && r.status === 401) showRelogin();
       return !!(r && r.ok);
     }).catch(function () {
@@ -1449,14 +1460,56 @@
     });
   };
 
+  // Ask the server for the next document number (invoice / po / order). The
+  // increment happens atomically in the database, so two devices can never be
+  // handed the same number. Returns { no, next, ... } or null when offline —
+  // callers fall back to their local counter (with a local duplicate check).
+  window.allocateNumber = function (kind, companyId) {
+    return fetch("/api/allocate-number", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: kind, companyId: companyId || "" }),
+    }).then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (j) { return j && j.ok && j.no ? j : null; })
+      .catch(function () { return null; });
+  };
+
   // ---- automatic full-state save (safety net) ----
   // Saves EVERY data collection on a timer and when the tab is hidden/closed,
   // so screens do not need manual wiring to be saved. This is what lets new
   // Claude Design exports work without per-file changes.
   var _skipKeys = { today: true, blankPerms: true, allPerms: true };
-  var _lastSnapshot = "";
+  // Per-collection record of what the SERVER has confirmed (JSON string each).
+  // The autosave sends ONLY collections whose current JSON differs — so two
+  // devices working in different areas never overwrite each other's data. (The
+  // old full-state save clobbered EVERY collection with this device's copy.)
+  var _lastSaved = {};
   var _saveLock = 0;    // >0 while a persistNow save-or-stay transaction is in flight
   var _saving = false;  // a full-state save is already on the wire — don't stack another
+
+  // Which collections changed since the last confirmed save → { name: json }.
+  function diffChanges() {
+    var changed = null;
+    Object.keys(window.BCCWE).forEach(function (name) {
+      if (_skipKeys[name]) return;
+      var v = window.BCCWE[name];
+      if (typeof v === "function") return;
+      var j;
+      try { j = JSON.stringify(v); } catch (e) { return; }
+      if (_lastSaved[name] !== j) { (changed = changed || {})[name] = j; }
+    });
+    return changed;
+  }
+  function bodyFrom(changed) {
+    return "{" + Object.keys(changed).map(function (n) { return JSON.stringify(n) + ":" + changed[n]; }).join(",") + "}";
+  }
+  function seedLastSaved() {
+    _lastSaved = {};
+    Object.keys(window.BCCWE).forEach(function (name) {
+      if (_skipKeys[name]) return;
+      if (typeof window.BCCWE[name] === "function") return;
+      try { _lastSaved[name] = JSON.stringify(window.BCCWE[name]); } catch (e) {}
+    });
+  }
 
   function snapshotState() {
     var snap = {};
@@ -1539,7 +1592,8 @@
               try { localStorage.setItem("bccwe_token", res.j.token); } catch (e) {}
               try { wrap.parentNode.removeChild(wrap); } catch (e) {}
               _reloginOpen = false;
-              _lastSnapshot = "";   // force a full save of everything now
+              // The per-collection diff knows exactly what failed to save while
+              // the session was dead — send just that now.
               autoSave(false);
             } else {
               err.textContent = (res.j && res.j.error) || "Wrong ID or password.";
@@ -1558,21 +1612,25 @@
   }
 
   // Normal save — plain fetch has NO body-size limit (works for any data size).
-  // CRITICAL: _lastSnapshot is only advanced on CONFIRMED success. Previously it
-  // was set before the request, so one failed save marked the state "saved" and
-  // it was never retried — silent, permanent data loss.
-  function saveAsync(json) {
-    if (_saving) return;   // one full-state save on the wire at a time
+  // CRITICAL: _lastSaved advances only on CONFIRMED success, so a failed
+  // attempt is retried by the 2s net (before Phase 1, one failure marked the
+  // state "saved" forever — silent, permanent data loss).
+  function saveAsync(changed) {
+    if (_saving) return;   // one net save on the wire at a time
     _saving = true;
     setStatus("saving", "Saving…");
     fetch("/api/save-bulk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: json,
+      body: bodyFrom(changed),
     })
       .then(function (res) {
         _saving = false;
-        if (res && res.ok) { _lastSnapshot = json; setStatus("ok", "✓ Saved"); return; }
+        if (res && res.ok) {
+          Object.keys(changed).forEach(function (n) { _lastSaved[n] = changed[n]; });
+          setStatus("ok", "✓ Saved");
+          return;
+        }
         if (res && res.status === 401) { setStatus("err", "✗ Not saved — session expired"); showRelogin(); return; }
         if (res && res.status === 413) { setStatus("err", "✗ Not saved — data exceeds the server's size limit"); return; }
         setStatus("err", "✗ Not saved (server error " + (res ? res.status : "?") + ") — retrying");
@@ -1610,16 +1668,15 @@
   function autoSave(isExit) {
     if (!window.__dataLoaded) return; // never save until real data is loaded
     if (!isExit && _saveLock > 0) return; // a save-or-stay transaction is mid-flight
-    var json;
-    try { json = JSON.stringify(snapshotState()); } catch (e) { return; }
-    if (json === _lastSnapshot) return;
-    if (isExit) { saveOnExit(json); return; } // best-effort — never marked "saved"
-    saveAsync(json);
+    var changed = diffChanges(); // ONLY collections this device actually changed
+    if (!changed) return;
+    if (isExit) { saveOnExit(bodyFrom(changed)); return; } // best-effort — never marked "saved"
+    saveAsync(changed);
   }
 
-  try { _lastSnapshot = JSON.stringify(snapshotState()); } catch (e) {}
+  try { seedLastSaved(); } catch (e) {}
   // Check often so new invoices/returns are saved within a couple of seconds.
-  // A failed attempt leaves _lastSnapshot behind, so the next tick retries.
+  // A failed attempt leaves _lastSaved behind, so the next tick retries.
   setInterval(function () { autoSave(false); }, 2000);
   document.addEventListener("visibilitychange", function () {
     // Tab hidden (not closing): the page is still alive, so use the normal

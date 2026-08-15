@@ -220,8 +220,32 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
   const priceHist = (code) => { try { return (window.clientPurchaseHistory && window.clientPurchaseHistory(clientId, code, 3)) || []; } catch (e) { return []; } };
 
   async function save() {
+    // Allocate the number SERVER-SIDE at save time — an atomic DB increment, so
+    // two devices can never issue the same invoice number (the on-screen number
+    // was only a preview from this device's counter). Falls back to the local
+    // counter when offline; either way a local duplicate check runs last.
+    let finalNo = invNo;
+    let serverAlloc = null;
+    if (!edit) {
+      if (!invNoTouched && window.allocateNumber) {
+        serverAlloc = await window.allocateNumber("invoice", companyId);
+        if (serverAlloc) {
+          finalNo = serverAlloc.no;
+          const co = window.STORES && window.STORES.byId(serverAlloc.companyId || companyId);
+          if (co && serverAlloc.next) co.nextInvoiceNo = serverAlloc.next; // mirror the server's counter
+        }
+      }
+      if (D.invoices.some((i) => i.no === finalNo)) {
+        if (invNoTouched) { pushToast("Invoice # " + finalNo + " already exists — choose a different number."); return; }
+        let guard = 0;
+        while (D.invoices.some((i) => i.no === finalNo) && guard++ < 500) {
+          const m = /^(.*?)(\d+)$/.exec(finalNo);
+          finalNo = m ? m[1] + (parseInt(m[2], 10) + 1) : finalNo + "-2";
+        }
+      }
+    }
     const rec = {
-      no: edit ? edit.no : invNo, // never rename on edit — payments/credit notes/mail reference the number
+      no: edit ? edit.no : finalNo, // never rename on edit — payments/credit notes/mail reference the number
       companyId, clientId, date, due, terms, kind: docKind, sales: salesId, tax: taxMode,
       subtotal: calc.subtotal, gst: calc.gst, pst: calc.pst, total: calc.total,
       // Persist the invoice-level discount so editing restores it (previously it
@@ -269,21 +293,25 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
     const adj = [];
     if (docKind !== "order") lines.forEach((l) => { if (l.code && l.qty > 0) { const it = stockable(l.code); if (it) { it.stock -= l.qty; adj.push([it, l.qty]); } } });
     D.invoices.unshift(rec);
-    window.logAudit("CREATE", "Invoice", "invoices", invNo, "Created invoice — total " + fmt(calc.total) + (storeObj ? " · " + storeObj.name : "") + (clientId ? " to " + (clientName(clientId) || "") : ""));
-    const bumped = !invNoTouched && window.bumpStoreInvoiceNo;
+    window.logAudit("CREATE", "Invoice", "invoices", rec.no, "Created invoice — total " + fmt(calc.total) + (storeObj ? " · " + storeObj.name : "") + (clientId ? " to " + (clientName(clientId) || "") : ""));
+    // Bump the LOCAL counters only when the server didn't allocate (offline
+    // fallback) — a server allocation already advanced the real counter, and
+    // the local mirror was updated from its response.
+    const bumped = !serverAlloc && !invNoTouched && window.bumpStoreInvoiceNo;
     if (bumped) window.bumpStoreInvoiceNo(companyId);
-    D.nextInvoiceNo += 1;
+    if (!serverAlloc) D.nextInvoiceNo += 1;
     const ok = window.persistNow ? await window.persistNow("invoices", "companies", "itemSales", "inventory") : true;
     if (!ok) {
       D.invoices = D.invoices.filter((i) => i !== rec);
       addedSales.forEach((e) => { const i = D.itemSales.indexOf(e); if (i >= 0) D.itemSales.splice(i, 1); });
       adj.forEach(([it, q]) => { it.stock += q; });
-      D.nextInvoiceNo -= 1;
+      // Server-allocated numbers stay consumed (a gap, never a duplicate).
+      if (!serverAlloc) D.nextInvoiceNo -= 1;
       if (bumped) { const c = window.STORES.byId(companyId); if (c) c.nextInvoiceNo = (c.nextInvoiceNo || 1001) - 1; }
       pushToast(failMsg);
       return;
     }
-    pushToast(invNo + " saved · journal posted (" + fmt(calc.total) + ")");
+    pushToast(rec.no + " saved · journal posted (" + fmt(calc.total) + ")");
     const waClient = D.clients.find((c) => c.id === clientId);
     if (waClient && window.waNumber(waClient)) {
       if (window.confirm("Send invoice " + rec.no + " to " + waClient.name + " on WhatsApp?")) {

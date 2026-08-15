@@ -62,8 +62,17 @@ function Orders({ go, pushToast }) {
     window.logAudit("POST", "Order", "orders", o.id, "Received order " + o.id + " into inventory");
     persist(); close();
   }
-  function createOrder(data) {
-    const id = "ORD-" + (D.nextOrderNo++);
+  async function createOrder(data) {
+    // Server-side atomic order number; local counter only as offline fallback.
+    let id = "ORD-" + D.nextOrderNo;
+    const a = window.allocateNumber ? await window.allocateNumber("order") : null;
+    if (a) { id = a.no; if (a.next) D.nextOrderNo = Math.max(D.nextOrderNo || 0, a.next); }
+    else D.nextOrderNo++;
+    let _g = 0;
+    while (D.orders.some((o) => o.id === id) && _g++ < 500) {
+      const m = /^(.*?)(\d+)$/.exec(id);
+      id = m ? m[1] + (parseInt(m[2], 10) + 1) : id + "-2";
+    }
     D.orders.unshift({
       id, clientId: data.clientId, placed: D.today, portal: data.portal,
       paid: data.paid, status: "Ordering", tracking: "",

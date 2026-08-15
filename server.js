@@ -261,6 +261,76 @@ app.post("/api/state", requireAuth, async (req, res) => {
   }
 });
 
+// ---- Atomic document-number allocation ----
+// Two devices minting numbers from their own in-memory counters is how
+// duplicate invoice numbers happen. This allocates them server-side inside a
+// transaction (SELECT ... FOR UPDATE serializes concurrent requests), so every
+// device gets a unique number no matter how many are open at once.
+// Factored out of the route so it can be unit-tested with a stubbed connection.
+async function allocateDocNumber(conn, kind, companyId) {
+  const readLocked = async (name) => {
+    const [rows] = await conn.query("SELECT data FROM collections WHERE name = ? FOR UPDATE", [name]);
+    if (!rows.length) return null;
+    try { return JSON.parse(rows[0].data); } catch (e) { return null; }
+  };
+  const write = (name, data) => conn.query(
+    "INSERT INTO collections (name, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)",
+    [name, JSON.stringify(data)]
+  );
+  if (kind === "invoice") {
+    const companies = await readLocked("companies");
+    if (Array.isArray(companies) && companies.length) {
+      const co = companies.find((c) => c.id === companyId)
+        || companies.find((c) => c.active !== false) || companies[0];
+      const n = co.nextInvoiceNo || 1001;
+      co.nextInvoiceNo = n + 1;
+      await write("companies", companies);
+      return { ok: true, no: (co.invPrefix || "INV-") + n, next: co.nextInvoiceNo, companyId: co.id };
+    }
+    // No stores configured — fall back to the flat counter.
+    let n = (await readLocked("nextInvoiceNo")) || 1001;
+    await write("nextInvoiceNo", n + 1);
+    return { ok: true, no: "INV-" + n, next: n + 1 };
+  }
+  if (kind === "po" || kind === "order") {
+    // Dedicated counters row; seeded once from the highest existing reference
+    // so allocation continues the visible sequence.
+    const counters = (await readLocked("counters")) || {};
+    if (!counters[kind]) {
+      const src = (await readLocked(kind === "po" ? "purchaseOrders" : "orders")) || [];
+      let max = kind === "po" ? 342 : 1009;
+      (Array.isArray(src) ? src : []).forEach((r) => {
+        const m = /(\d+)$/.exec(String(r.ref || r.po || r.id || ""));
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      });
+      counters[kind] = max + 1;
+    }
+    const n = counters[kind];
+    counters[kind] = n + 1;
+    await write("counters", counters);
+    return { ok: true, no: (kind === "po" ? "PO-" : "ORD-") + n, next: n + 1 };
+  }
+  return { ok: false, error: "unknown kind" };
+}
+
+app.post("/api/allocate-number", requireAuth, async (req, res) => {
+  const kind = String((req.body && req.body.kind) || "");
+  const companyId = String((req.body && req.body.companyId) || "");
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const out = await allocateDocNumber(conn, kind, companyId);
+    if (out.ok) { await conn.commit(); return res.json(out); }
+    await conn.rollback();
+    res.status(400).json(out);
+  } catch (e) {
+    try { await conn.rollback(); } catch (e2) {}
+    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    conn.release();
+  }
+});
+
 // ---- Admin: in-app updater for design files ----
 // Lets the owner upload new design files (.jsx, .css, .js) from a browser.
 // Protected by an admin password. Only writes into public/app/, never

@@ -944,7 +944,15 @@ function PurchasePage({ go, pushToast, store }) {
     // snapshot for rollback if the save fails
     const snap = {};
     try { ["inventory", "purchaseOrders"].forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
-    const base = "PO-" + (342 + D.purchaseOrders.length);
+    // Server-side atomic ref allocation (two devices can't mint the same PO-#);
+    // array-length fallback only when offline, then a local duplicate check.
+    let base = "PO-" + (342 + D.purchaseOrders.length);
+    if (window.allocateNumber) { const a = await window.allocateNumber("po"); if (a) base = a.no; }
+    let _g = 0;
+    while (D.purchaseOrders.some((p) => (p.ref || p.po) === base) && _g++ < 500) {
+      const m = /^(.*?)(\d+)$/.exec(base);
+      base = m ? m[1] + (parseInt(m[2], 10) + 1) : base + "-2";
+    }
     let recvUnits = 0;
     const orderLines = pls.map((l) => {
       const it = itemByCode(l.code);

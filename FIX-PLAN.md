@@ -107,19 +107,28 @@ Root cause: saves fail or mislead, and a failed load shows demo data as real.
       change→one save, 401→overlay, persistNow lock — all pass. **Browser test recommended:** stop the
       Node app mid-edit → red badge appears; start it → relogin overlay → work saved.
 
-### Phase 2 — Numbering & concurrency  · CRITICAL/HIGH *(depth depends on usage-model answer)*
+### Phase 2 — Numbering & concurrency  · CRITICAL/HIGH  *(done)*
 Root cause: numbers allocated in-memory + full-state last-writer-wins.
-- [ ] **Full-snapshot autosave clobbers concurrent sessions.** Two browsers each hold the whole
-      dataset; a stale autosave overwrites another's new records. `data.js:1398-1406, 1484` +
-      `server.js:175-194` → per-collection dirty saves and/or optimistic concurrency (version/updatedAt).
-- [ ] **Duplicate invoice / PO / order numbers.** Counter read at mount, bumped only on save; two tabs
-      get the same number; the number field is user-editable; no uniqueness check on save.
-      `invoice-generator.jsx:28,256-257`, `screens-b.jsx:922,948` → allocate numbers server-side (or a
-      single-writer guard if single-user), plus a `some(i=>i.no===n)` check at save.
-- [ ] **`persistNow` rollback races the 2 s autosave** → phantom DB records + audit entries for
-      rolled-back work. `data.js:1484`, `invoice-generator.jsx:255` → pause autosave while a
-      `persistNow` is in flight; write audit log only *after* a confirmed save.
-- **Verify:** two-tab test — create records in both, confirm none vanish and no number collides.
+- [x] **Full-snapshot autosave clobbered concurrent sessions.** `data.js` → the autosave (and the exit
+      save) now sends ONLY collections whose JSON differs from the last CONFIRMED save (per-collection
+      `_lastSaved` map; `persist`/`persistNow` update it too). Two devices working in different areas
+      no longer overwrite each other at all. *(done — harness on real data.js: one change → payload
+      contains exactly that one collection.)* *Residual (documented): two devices editing the SAME
+      collection concurrently still last-write-wins on that collection — full merge/versioning is out
+      of scope for this architecture.*
+- [x] **Duplicate invoice / PO / order numbers.** `server.js` → new `POST /api/allocate-number`:
+      numbers are allocated atomically in the DB (`SELECT … FOR UPDATE` serializes devices) — invoices
+      per-store (prefix + counter), PO/order via a `counters` collection seeded from the highest
+      existing reference. Clients allocate at SAVE time (the on-screen number is a preview), mirror
+      the returned counter, fall back to local counters offline, and always run a local duplicate
+      check (manual numbers are blocked with a toast if taken). All four minting sites patched:
+      invoice generator, PurchasePage, Orders, client-shop checkout. Failed saves leave a burned
+      number (gap), never a duplicate. *(done — allocator harness: 7/7 incl. per-store prefixes,
+      seeding past PO-358, fresh-DB fallback.)*
+- [x] **`persistNow` rollback raced the 2 s autosave** → done in Phase 1 (autosave suspended while a
+      save-or-stay transaction is in flight). *Audit-log-after-confirm is still a nice-to-have.*
+- **Verify:** harnesses green (14/14). **Browser test recommended:** two devices, create invoices
+      simultaneously → distinct numbers; edit different areas on each → both survive.
 
 ### Phase 3 — Security & access control  · CRITICAL *(core done; two items deferred — see notes)*
 - [x] **Blank-password admin takeover.** `server.js` → the staff-login branch now skips `isOwner` records
