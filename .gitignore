@@ -1,3 +1,6 @@
 node_modules/
 db-config.json
 public/app/_backups/
+
+# Deployment ZIPs built for FTP upload (build artifacts, not source)
+*.zip
