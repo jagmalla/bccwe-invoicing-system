@@ -767,6 +767,41 @@ function testPurchasingAndStores() {
   ok(Math.abs(bal["2000"] || 0) < 0.02 && Math.abs((bal["1010"] || 0) + 112) < 0.02,
     "paying the supplier in full clears A/P and takes $112.00 from the bank");
 
+  // --- Deleting a purchase order must reverse EXACTLY what receiving added ---
+  const bsrc2 = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+  const grab = (name) => {
+    const m = new RegExp("function\\s+" + name + "\\s*\\(").exec(bsrc2);
+    let i = bsrc2.indexOf("{", m.index), d = 0, end = -1;
+    for (let k = i; k < bsrc2.length; k++) { if (bsrc2[k] === "{") d++; else if (bsrc2[k] === "}") { d--; if (!d) { end = k + 1; break; } } }
+    return bsrc2.slice(m.index, end);
+  };
+  let INV = [];
+  const poDeleteEffect = new Function("poLines", "itemByCode", "poBilledValue",
+    grab("poDeleteEffect") + "\nreturn poDeleteEffect;")(poLines, (c) => INV.find((x) => x.code === c), () => 0);
+  // the receiving screen's own rule for granting free units
+  const receiveLine = (l, got) => {
+    const out0 = Math.max(0, (l.qty || 0) - (l.qtyReceived || 0));
+    return got + (got >= out0 && out0 > 0 ? (l.bonusQty || 0) : 0);
+  };
+  [["full receipt with bonus", { qty: 10, bonusQty: 2 }, 10],
+   ["partial receipt (no bonus granted)", { qty: 10, bonusQty: 2 }, 6],
+   ["full receipt, no bonus", { qty: 10, bonusQty: 0 }, 10],
+   ["nothing received", { qty: 10, bonusQty: 2 }, 0]].forEach(([label, line, got]) => {
+    const l = Object.assign({ code: "A", qtyReceived: 0 }, line);
+    const added = receiveLine(l, got);
+    l.qtyReceived = got;
+    INV = [{ code: "A", stock: added, cost: 10 }];
+    const eff = poDeleteEffect({ po: "PO-D", ref: "PO-D", lines: [l], status: "Received" });
+    ok(eff.units === added, "PO delete reverses exactly what receiving added — " + label + " (added " + added + ", removes " + eff.units + ")");
+  });
+  INV = [{ code: "A", stock: 3, cost: 10 }];
+  ok(poDeleteEffect({ po: "PO-E", ref: "PO-E", lines: [{ code: "A", qty: 10, bonusQty: 0, qtyReceived: 10 }], status: "Received" }).negatives.length === 1,
+    "PO delete warns when the units have already been sold on (stock would go negative)");
+  INV = [{ code: "A", stock: 5, cost: 10 }];
+  const pseudo = poDeleteEffect({ po: "OPEN-A-x1", code: "A", qty: 5, bonusQty: 0, qtyReceived: 5, landedUnit: 10, total: 50, status: "Received" });
+  ok(pseudo.units === 5 && pseudo.owing === 0 && pseudo.pay === 0,
+    "deleting an opening-stock record reverses its stock but clears no supplier payable");
+
   // Order deposits: money held as a liability, no revenue until it becomes a sale.
   D = base();
   D.invoices = [{ no: "ORD-1", kind: "order", clientId: "c1", date: "2026-08-01", subtotal: 1000, gst: 50, pst: 70, total: 1120, paid: 200, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 1000, cost: 400 }] }];

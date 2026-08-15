@@ -416,6 +416,60 @@ function Inventory({ go, pushToast, initTab }) {
     if (po.status === "Received") { pushToast && pushToast((po.ref || po.po) + " is already received"); return; }
     go("receive/" + (po.ref || po.po));
   }
+  // What deleting a purchase order will undo — computed up front so the
+  // confirmation can state it plainly and the delete can apply exactly that.
+  function poDeleteEffect(po) {
+    const lines = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+    const received = lines.map((l) => {
+      const got = l.qtyReceived || 0, ordered = l.qty || 0;
+      // Free bonus units are only granted when a line arrives IN FULL (see the
+      // receiving screen), so a short receipt never added them — and deleting
+      // it must not take them back out.
+      const bonus = (ordered > 0 && got >= ordered) ? (l.bonusQty || 0) : 0;
+      return { code: l.code, units: got + bonus, name: l.name || l.code };
+    }).filter((x) => x.code && x.units > 0);
+    const units = received.reduce((s, x) => s + x.units, 0);
+    // Any line that would push an item's stock below zero (units already sold on).
+    const negatives = received.filter((x) => {
+      const it = itemByCode(x.code);
+      return it && (it.stock || 0) - x.units < 0;
+    });
+    const pay = (po.payment && +po.payment.amount) || 0;
+    // Opening-stock / adjustment pseudo-orders carry no supplier bill — the
+    // books skip them, so deleting one clears no payable.
+    const pseudo = /^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""));
+    const owing = (!pseudo && typeof poBilledValue === "function") ? +(poBilledValue(po) - pay).toFixed(2) : 0;
+    return { received, units, negatives, pay: pseudo ? 0 : pay, owing };
+  }
+  async function deletePO(po) {
+    const ref = po.ref || po.po;
+    const eff = poDeleteEffect(po);
+    const snapKeys = ["purchaseOrders", "inventory"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    // Take the received units back out of stock. The moving-average cost is NOT
+    // recalculated — the receipts that formed it are gone, so the current cost
+    // stays as the best estimate (the confirmation says so).
+    eff.received.forEach((x) => {
+      const it = itemByCode(x.code);
+      if (it) it.stock = (it.stock || 0) - x.units;
+    });
+    const idx = D.purchaseOrders.findIndex((p) => p === po);
+    if (idx >= 0) D.purchaseOrders.splice(idx, 1);
+    window.logAudit("DELETE", "Purchase", "purchaseOrders", ref,
+      "Deleted purchase order " + ref + " · " + supplierName(po.supplier)
+      + (eff.units ? " · " + eff.units + " unit(s) removed from stock" : "")
+      + (eff.pay ? " · supplier payment " + fmt(eff.pay) + " reversed" : "")
+      + (Math.abs(eff.owing) > 0.005 ? " · payable " + fmt(eff.owing) + " cleared" : ""));
+    const ok = window.persistNow ? await window.persistNow("purchaseOrders", "inventory") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was deleted; please try again.");
+    } else {
+      pushToast && pushToast("Purchase order " + ref + " deleted" + (eff.units ? " · " + eff.units + " unit(s) removed from stock" : ""));
+    }
+    close(); bump();
+  }
   function moveState(item, st) {
     if (st === "active") delete item.stockState; else item.stockState = st;
     pushToast && pushToast(item.code + (st === "dead" ? " → Dead stock" : st === "notmoving" ? " → Not moving" : " restored to active stock"));
@@ -624,6 +678,7 @@ function Inventory({ go, pushToast, initTab }) {
                       <td className="row-acts">
                         <button className="icon-btn" title="Open order" onClick={() => go("po/" + ref)}><Icon name="eye" size={15} /></button>
                         {p.status !== "Received" && <Btn variant="ghost" size="sm" icon="check" onClick={() => receiveOrder(p)}>Receive</Btn>}
+                        {_canInlineEdit && <button className="icon-btn danger" title="Delete this purchase order" onClick={() => setModal({ type: "delpo", po: p })}><Icon name="trash" size={15} /></button>}
                       </td>
                     </tr>
                     {open && lines.map((l, li) => {
@@ -674,6 +729,44 @@ function Inventory({ go, pushToast, initTab }) {
       {(modal && modal.type === "view") && <ItemViewModal item={modal.item} onClose={close} onEdit={() => setModal({ type: "edit", item: modal.item })} />}
       {(modal && modal.type === "delete") && <DeleteItemModal item={modal.item} onConfirm={() => deleteItem(modal.item)} onClose={close} />}
       {(modal && modal.type === "receivepo") && <ReceivePOModal po={modal.order} onConfirm={receivePO} onClose={close} />}
+      {(modal && modal.type === "delpo") && (() => {
+        const po = modal.po, ref = po.ref || po.po, eff = poDeleteEffect(po);
+        return (
+          <Modal title={"Delete purchase order " + ref} onClose={close}
+            footer={<>
+              <Btn variant="ghost" onClick={close}>Cancel</Btn>
+              <Btn variant="danger" icon="trash" onClick={() => deletePO(po)}>Delete permanently</Btn>
+            </>}>
+            <p style={{ marginBottom: 12 }}>
+              This permanently removes <strong>{ref}</strong> ({supplierName(po.supplier)} · {fmt(po.total || 0)}). It cannot be undone.
+            </p>
+            <ul className="rail-note" style={{ paddingLeft: 18, lineHeight: 1.9 }}>
+              {eff.units > 0
+                ? <li><strong>{eff.units} unit{eff.units === 1 ? "" : "s"}</strong> come back out of stock ({eff.received.map((x) => x.code + " ×" + x.units).join(", ")})</li>
+                : <li>Nothing was received on this order, so stock is unaffected</li>}
+              {Math.abs(eff.owing) > 0.005 && <li><strong>{fmt(eff.owing)}</strong> owed to this supplier is cleared from Accounts Payable</li>}
+              {eff.pay > 0.005 && <li>The recorded supplier payment of <strong>{fmt(eff.pay)}</strong> is reversed — money goes back into {(po.payment && po.payment.account) === "1000" ? "Cash on Hand" : "the bank"}</li>}
+              <li>It disappears from purchase history, the A/P report and item cost history</li>
+            </ul>
+            {eff.negatives.length > 0 && (
+              <div className="inline-note">
+                <Icon name="alert" size={15} /> Some of these units have already been sold, so stock will go negative on{" "}
+                <strong>{eff.negatives.map((x) => x.code).join(", ")}</strong>. Fix the count on the stock list afterwards.
+              </div>
+            )}
+            {eff.pay > 0.005 && (
+              <div className="inline-note">
+                <Icon name="alert" size={15} /> If you really paid this supplier, deleting the order removes that payment from your books too.
+                Delete only if the order was entered by mistake.
+              </div>
+            )}
+            <div className="inline-note">
+              <Icon name="alert" size={15} /> Item costs are not recalculated — the average cost this order contributed stays as it is.
+              Check the item's cost afterwards if this order changed it.
+            </div>
+          </Modal>
+        );
+      })()}
       {(modal && modal.type === "import") && <ImportModal {...importCfg} pushToast={pushToast} onClose={close} />}
       {(modal && modal.type === "barcodes") && <BarcodeModal items={D.inventory} initialCode={modal.code} pushToast={pushToast} onClose={close} />}
     </div>
