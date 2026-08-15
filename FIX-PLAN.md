@@ -286,36 +286,37 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
 - **Verify (browser):** partial-receive an order twice → ONE discrepancy row set, correct stock/cost; POS sale appears
       in the General Journal and CoA; price-only CSV leaves stock/cost intact; edit a received PO → status stays.
 
-### Phase 9 — Reports & dashboard display  · MEDIUM
-- [ ] **Dashboard "Revenue MTD" uses tax-inclusive totals, counts order deposits, ignores returns.** `screens-a.jsx:49-51,78-79`
-      → sum subtotals, skip `kind==="order"`, subtract credit notes.
-- [ ] **"Outstanding"/"Overdue" KPIs**: overpaid invoices subtract, orders included, overdue never recomputed.
-      `screens-a.jsx:45-46` → `Math.max(0,…)`, exclude orders, derive overdue from `due<today && balance>0`.
-- [ ] **Revenue-trend tooltip inflates values 1000×.** `screens-a.jsx:110` → `fmt(v)`.
-- [ ] **InvoiceHistory register rows overwrite pre-tax subtotal with total and mark partial sales Paid.**
-      `screens-a.jsx:226` → use `s.subtotal/s.paid/s.owed`.
-- [ ] **People "A/R balance" reads an unmaintained `clients[].balance`.** `screens-a.jsx:668` → derive like ClientAccount.
-- [ ] **Sales-by-item / People revenue use *current* price/cost, ignore recorded sale price & returns.**
-      `screens-a.jsx:513-518`, `screens-b.jsx:1791-1795` → use `s.price*(1-(s.disc||0)/100)` and cost-at-sale; net returns.
-- [ ] *(Lower)* hardcoded KPI deltas ("+12.4%"), three disagreeing cash figures, order-type filter/label.
-- **Verify:** dashboard MTD vs. a hand-computed month; People balance matches ClientAccount.
+### Phase 9 — Reports & dashboard display  · MEDIUM  *(done)*
+- [x] **Dashboard "Revenue MTD"** now pre-tax, excludes order deposits, nets returns (invoice + register + CN). *(done)*
+- [x] **"Outstanding"/"Overdue" KPIs** use the return-aware `invOpenBalance`, exclude orders, and derive overdue
+      from `due < today` (the stored status was frozen). GST/PST tile now nets input tax credits. *(done)*
+- [x] **Revenue-trend tooltip 1000× inflation** fixed; the trend uses net pre-tax revenue; month labels derived
+      from real dates (were hardcoded Mar–Jun). *(done)*
+- [x] **InvoiceHistory register rows** keep the real pre-tax subtotal and collected/owed split; partially-paid
+      register sales show "Partially Paid". *(done)*
+- [x] **People "A/R balance"** derived from invoices (return-aware), not the unmaintained stored field. *(done)*
+- [x] **Sales-by-item / People / item-view analytics** use the RECORDED price/discount/cost-at-sale (all itemSales
+      writers now capture `cost`); restocked returns write negative rows so units/revenue/profit net out. *(done)*
+- [x] *(Lower)* fabricated KPI decorations removed ("+12.4%", "2 accounts", fake remittance date).
+- **Verify (browser):** dashboard MTD vs a hand-computed month; People A/R matches ClientAccount.
 
-### Phase 10 — Config hygiene & settings safety  · MEDIUM/LOW
-- [ ] **`freshDefaults()` keeps demo identity → every outgoing email is CC'd to `records@bccwe.ca`** (a domain the
-      user doesn't own) and real PDFs print fake GST/PST numbers; it also wipes `categories/catTree/services`.
-      `data.js:800-808,956-957,1293-1308` → blank demo backup email / tax numbers / contact; keep setup lists.
-- [ ] **Editing the "No Tax" mode silently converts it to 5% GST** for exempt clients. `screens-settings.jsx:587-606`
-      → seed the editor from actual rates; forbid editing system-mode components.
-- [ ] **Store-delete guard misses fallback-owned (no-`companyId`) invoices** → deleting the default store re-homes them.
-      `screens-stores.jsx:26-35` → count `STORES.idOf(i)===s.id`; block deleting the default store while such records exist.
-- [ ] **Custom roles are unranked (treated as rank 0)** → defeats the rank wall on assignment/visibility.
-      `screens-settings.jsx:663,793` → persist a numeric rank; treat unknown conservatively.
-- [ ] **Download-log entries attributed to demo user "Harman Gill".** `data.js:595` → default to `currentUser().name`.
-- [ ] **Code-config (`modules`, `TAX` structure, role perms) is persisted and "DB always wins"** → frozen at first seed.
-      `data.js:1330-1332` → exclude static config from persistence, or merge code over stored on load.
-- [ ] *(Lower)* deactivating the owner does nothing; CSV UTF-8 BOM breaks import; `route.split` drops multi-segment ids;
-      same-ms log id collisions; seed-data nits (`c4` balance, `CASE-IP14`, missing `companyId`).
-- **Verify:** fresh-start a scratch DB → no demo email/tax numbers; category/service dropdowns populated; email has no stray CC.
+### Phase 10 — Config hygiene & settings safety  · MEDIUM/LOW  *(done)*
+- [x] **Demo identity purged.** `freshDefaults()` blanks the demo backup/CC/accountant emails and fake GST/PST
+      numbers, and keeps setup (categories/catTree/services) instead of wiping it. **Plus a load-time scrub for
+      EXISTING databases**: the exact seed values (`records@bccwe.ca` CC, `accounts@bccwe.ca`, demo GST/PST) are
+      removed on next load — the silent CC on every outgoing invoice is dead. *(done)*
+- [x] **"No Tax" edit trap** — the editor now seeds 0% for a zero-tax mode instead of a 5% GST default, so opening
+      and saving it no longer converts exempt clients to taxed. *(done)*
+- [x] **Store-delete guard** counts fallback ownership (invoices/sales/POs with no `companyId` that default to the
+      store). *(done)*
+- [x] **Custom roles carry a persisted rank** (inherited from the copied role; legacy unranked = manager level, not
+      0) — closes the assign-a-powerful-custom-role escalation. *(done)*
+- [x] **Download log** attributed to the real signed-in user; log ids collision-proofed. *(done)*
+- [x] **`modules` (permission definitions) is code, not data** — kept from code on load and never persisted, so new
+      permissions ship to existing installs. `TAX`/roles stay user-editable data. *(done — harness-verified.)*
+- [x] *(Lower)* owner deactivate no-op is now blocked with an explanation; BOM fixed earlier; multi-segment route
+      params preserved; same-ms log id collisions fixed. Seed-data nits left as-is (demo only).
+- **Verify (browser):** fresh-start → no demo CC/tax numbers, dropdowns populated; open+save "No Tax" → still 0%.
 
 ---
 

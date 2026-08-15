@@ -329,7 +329,7 @@
   function emitMail() { try { window.dispatchEvent(new CustomEvent("bccwe-mail")); } catch (e) {} }
   // append an email send and return its log id (status starts "Pending")
   window.logEmail = function (entry) {
-    const id = "m" + Date.now().toString(36);
+    const id = "m" + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
     const now = window.BCCWE.today + " " + new Date().toTimeString().slice(0, 5);
     window.BCCWE.mailLog.unshift(Object.assign({ id, ts: now, cc: [], attachments: [], status: "Pending", code: "", note: "Queued — connecting to SMTP host…", openedAt: "" }, entry, { id }));
     window.saveBCCWEMail(); emitMail();
@@ -592,9 +592,10 @@
     } catch (e) {}
   };
   window.logDownload = function (entry) {
-    const id = "d" + Date.now().toString(36);
+    const id = "d" + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
     const now = window.BCCWE.today + " " + new Date().toTimeString().slice(0, 5);
-    window.BCCWE.downloadLog.unshift(Object.assign({ id, ts: now, kind: "PDF", docNo: "", clientId: "", user: "Harman Gill" }, entry, { id }));
+    const who = (window.currentUser && window.currentUser().name) || (window.__session && window.__session.name) || "";
+    window.BCCWE.downloadLog.unshift(Object.assign({ id, ts: now, kind: "PDF", docNo: "", clientId: "", user: who }, entry, { id }));
     window.saveBCCWEMail(); emitMail();
     return id;
   };
@@ -1308,12 +1309,25 @@
     var B = window.BCCWE;
     var out = {};
     Object.keys(B).forEach(function (k) { if (typeof B[k] !== "function") out[k] = B[k]; });
-    ["clients", "suppliers", "inventory", "services", "invoices", "payments", "expenses",
+    // Business RECORDS are wiped; SETUP (categories, category tree, services)
+    // is kept — a fresh start shouldn't leave the product/category and service
+    // dropdowns empty. Salespeople are demo names, so they go too.
+    ["clients", "suppliers", "inventory", "invoices", "payments", "expenses",
      "cashSales", "journal", "purchaseOrders", "mailLog", "downloadLog",
      "itemSales", "defectiveProducts", "creditNotes", "orders", "orderDiscrepancies", "auditLog",
-     "categories", "catTree", "salespeople"]
+     "salespeople"]
       .forEach(function (k) { out[k] = []; });
     out.clientPrices = {};
+    // Demo identity must NOT survive into a real business's fresh start: the
+    // seeded backup email silently CC'd every outgoing invoice to an address on
+    // a domain the user may not own, and the fake GST/PST numbers printed on
+    // real invoices.
+    if (out.prefs) out.prefs = Object.assign({}, out.prefs, { backupEmail: "", ccEmail: "", defaultInvoiceEmail: "", accountantName: "", accountantEmail: "" });
+    if (out.company) {
+      out.company = Object.assign({}, out.company);
+      if (/81427 6391/.test(String(out.company.gst || ""))) out.company.gst = "";
+      if (/1042-8837/.test(String(out.company.pst || ""))) out.company.pst = "";
+    }
     if (Array.isArray(out.accounts)) out.accounts = out.accounts.map(function (a) { return Object.assign({}, a, { balance: 0 }); });
     // Keep the stores (setup) but reset each store's invoice counter.
     if (Array.isArray(out.companies)) out.companies = out.companies.map(function (c) { return Object.assign({}, c, { nextInvoiceNo: 1000 }); });
@@ -1343,7 +1357,23 @@
     var st = authGet("/api/state");
     if (st.status === 200 && st.json) {
       if (!st.json.empty) {
+        // Permission DEFINITIONS (modules) are code, not data — "DB always wins"
+        // froze them at first-seed forever, so new permissions added in code
+        // never appeared. Keep the code's copy; it's also excluded from saves.
+        var _codeModules = window.BCCWE.modules;
         Object.keys(st.json).forEach(function (key) { window.BCCWE[key] = st.json[key]; });
+        window.BCCWE.modules = _codeModules;
+        // Demo-identity scrub for EXISTING databases (exact seed values only):
+        // the seeded backup email CC'd every outgoing invoice to records@bccwe.ca
+        // and the fake GST/PST numbers printed on real invoices.
+        var _p = window.BCCWE.prefs || {};
+        if (_p.backupEmail === "records@bccwe.ca") _p.backupEmail = "";
+        if (_p.ccEmail === "records@bccwe.ca") _p.ccEmail = "";
+        if (_p.defaultInvoiceEmail === "accounts@bccwe.ca") _p.defaultInvoiceEmail = "";
+        if (_p.accountantEmail === "dana.mehta@bccwe-cpa.ca") { _p.accountantEmail = ""; _p.accountantName = _p.accountantName === "Dana Mehta" ? "" : _p.accountantName; }
+        var _co = window.BCCWE.company || {};
+        if (/81427 6391/.test(String(_co.gst || ""))) _co.gst = "";
+        if (/1042-8837/.test(String(_co.pst || ""))) _co.pst = "";
         // Older DB snapshots predate some ledger accounts, and "DB always wins"
         // would hide them forever. Top up any that are missing so postings to
         // these codes show in the chart of accounts / trial balance.
@@ -1477,7 +1507,7 @@
   // Saves EVERY data collection on a timer and when the tab is hidden/closed,
   // so screens do not need manual wiring to be saved. This is what lets new
   // Claude Design exports work without per-file changes.
-  var _skipKeys = { today: true, blankPerms: true, allPerms: true };
+  var _skipKeys = { today: true, blankPerms: true, allPerms: true, modules: true /* code-defined, never persisted */ };
   // Per-collection record of what the SERVER has confirmed (JSON string each).
   // The autosave sends ONLY collections whose current JSON differs — so two
   // devices working in different areas never overwrite each other's data. (The

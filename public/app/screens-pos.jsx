@@ -52,7 +52,7 @@ function POS({ pushToast, go }) {
     cart.forEach((l) => {
       const it = D.inventory.find((x) => x.code === l.code);
       if (it) { it.stock = (it.stock || 0) - l.qty; adj.push([it, l.qty]); } // may go negative if oversold
-      if (clientId) { const e = { date: D.today, code: l.code, clientId, qty: l.qty, price: l.price, disc: 0 }; D.itemSales.unshift(e); addedSales.push(e); }
+      if (clientId) { const e = { date: D.today, code: l.code, clientId, qty: l.qty, price: l.price, disc: 0, cost: l.cost || 0 }; D.itemSales.unshift(e); addedSales.push(e); }
     });
     const label = cart.length === 1 ? cart[0].name : (cart[0].name + " +" + (cart.length - 1) + " more");
     const sale = {

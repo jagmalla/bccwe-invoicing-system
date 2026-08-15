@@ -586,7 +586,13 @@ function TaxComponentFields({ c, set, accents }) {
 
 function TaxTypeModal({ mode, m, onSave, onClose }) {
   const existing = m ? taxComponents(m) : [];
-  const initA = existing[0] || { bucket: "gst", name: "GST", rate: 0.05, agency: "CRA — Federal (GST/HST)", acct: "2100", acctName: "GST Payable" };
+  // A ZERO-tax mode ("No Tax") has no components — seeding the editor with the
+  // 5% GST default meant opening it and clicking Save silently converted the
+  // exempt mode into a taxed one for every exempt client. Seed 0% instead.
+  const isZeroTax = !!m && existing.length === 0 && ((m.gst || 0) + (m.pst || 0)) === 0;
+  const initA = existing[0] || (isZeroTax
+    ? { bucket: "gst", name: "No Tax", rate: 0, agency: "—", acct: "2100", acctName: "GST Payable" }
+    : { bucket: "gst", name: "GST", rate: 0.05, agency: "CRA — Federal (GST/HST)", acct: "2100", acctName: "GST Payable" });
   const initB = existing[1] || { bucket: "pst", name: "PST", rate: 0.07, agency: "BC Ministry of Finance (PST)", acct: "2110", acctName: "PST Payable" };
   const [label, setLabel] = useState(m ? m.label : "");
   const [hint, setHint] = useState(m ? m.hint || "" : "");
@@ -661,9 +667,18 @@ function usersInRole(id) { return BCCWE.users.filter((u) => u.role === id).lengt
 // Credential visibility by rank: a user can only view/manage accounts ranked
 // below their own; the admin/owner login sees everyone. (#7)
 var ROLE_RANK = { r_admin: 100, r_owner: 95, r_manager: 70, r_super: 50, r_sales: 30, r_client: 10 };
+// Rank of ANY role — built-ins from the table, custom roles from their stored
+// `rank` (copied from the source role at creation). Legacy custom roles with no
+// stored rank count as MANAGER level (70): previously they ranked 0, which let
+// any user-manager assign a powerful custom role to anyone (privilege escalation).
+function bccweRankOf(roleId) {
+  if (ROLE_RANK[roleId] != null) return ROLE_RANK[roleId];
+  var r = (BCCWE.roles || []).find(function (x) { return x.id === roleId; });
+  return r && r.rank != null ? r.rank : 70;
+}
 function bccweIsAdmin() { var s = window.__session || {}; if (s.roleId === "r_admin") return true; if (s.isOwner && !s.roleId) return true; return false; }
-function bccweRank() { var s = window.__session || {}; if (s.roleId != null && ROLE_RANK[s.roleId] != null) return ROLE_RANK[s.roleId]; if (s.isOwner) return 1000; return 0; }
-function bccweCanSeeCred(u) { if (bccweIsAdmin()) return true; return bccweRank() > (ROLE_RANK[u && u.role] != null ? ROLE_RANK[u.role] : 0); }
+function bccweRank() { var s = window.__session || {}; if (s.roleId != null) return bccweRankOf(s.roleId); if (s.isOwner) return 1000; return 0; }
+function bccweCanSeeCred(u) { if (bccweIsAdmin()) return true; return bccweRank() > bccweRankOf(u && u.role); }
 function initialsOf(name) { return name.split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?"; }
 
 function UsersPanel({ pushToast }) {
@@ -705,6 +720,9 @@ function UsersPanel({ pushToast }) {
     bump(); setModal(null);
   }
   function toggleActive(u) {
+    // The owner authenticates against the server's auth table, which never
+    // checks users[].active — flipping it here only LOOKED like a lockout.
+    if (u.isOwner) { pushToast && pushToast("The owner login can't be deactivated — it is the server's master account."); return; }
     u.active = !u.active;
     if (window.saveBCCWERbac) window.saveBCCWERbac();
     pushToast && pushToast(u.name + (u.active ? " activated" : " deactivated"));
@@ -717,7 +735,7 @@ function UsersPanel({ pushToast }) {
       <table className="data-table">
         <thead><tr><th>User</th><th>Role</th><th>Email</th><th>Status</th><th>Last active</th><th /></tr></thead>
         <tbody>
-          {D.users.filter((u) => bccweIsAdmin() || u.id === (window.sessionUid && window.sessionUid()) || (ROLE_RANK[u.role] != null ? ROLE_RANK[u.role] : 0) < bccweRank()).map((u) => (
+          {D.users.filter((u) => bccweIsAdmin() || u.id === (window.sessionUid && window.sessionUid()) || bccweRankOf(u.role) < bccweRank()).map((u) => (
             <tr key={u.id}>
               <td><div className="user-cell"><span className="avatar sm">{u.initials}</span><strong>{u.name}</strong></div></td>
               <td><Badge tone={roleTone(u.role)}>{(roleById(u.role) || {}).name || "—"}</Badge></td>
@@ -790,7 +808,7 @@ function UserFormModal({ user, onSave, onClose }) {
         <Field label="Email" required><input type="email" value={email} placeholder="name@bccwe.ca" onChange={(e) => setEmail(e.target.value)} /></Field>
         <Field label="Role" required>
           <select value={role} onChange={(e) => setRole(e.target.value)}>
-            {D.roles.filter((r) => bccweIsAdmin() || (ROLE_RANK[r.id] != null ? ROLE_RANK[r.id] : 0) <= bccweRank()).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            {D.roles.filter((r) => bccweIsAdmin() || bccweRankOf(r.id) <= bccweRank()).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
           </select>
         </Field>
         {isClientRole && (
@@ -937,7 +955,7 @@ function RolesPanel({ pushToast }) {
   function rename(r, name) { r.name = name; persist(); }
   function addRole(data) {
     const id = "r_" + Date.now().toString(36);
-    D.roles.push({ id, name: data.name, tone: data.tone, system: false, perms: deepClonePerms(data.perms) });
+    D.roles.push({ id, name: data.name, tone: data.tone, system: false, rank: data.rank != null ? data.rank : 70, perms: deepClonePerms(data.perms) });
     pushToast && pushToast("Role created — " + data.name);
     setAddOpen(false); setSelId(id); persist();
   }
@@ -1040,8 +1058,16 @@ function AddRoleModal({ onSave, onClose }) {
   function submit() {
     if (!valid) return;
     let perms = D.blankPerms();
-    if (copyFrom) { const src = roleById(copyFrom); if (src) perms = JSON.parse(JSON.stringify(src.perms)); }
-    onSave({ name: name.trim(), tone, perms });
+    // The new role inherits the RANK of the role it copies from (or manager
+    // level when starting blank) so the rank-based management wall applies to
+    // custom roles too — unranked roles previously counted as rank 0, letting
+    // anyone assign them regardless of how powerful their permissions were.
+    let rank = 70;
+    if (copyFrom) {
+      const src = roleById(copyFrom);
+      if (src) { perms = JSON.parse(JSON.stringify(src.perms)); rank = bccweRankOf(copyFrom); }
+    }
+    onSave({ name: name.trim(), tone, perms, rank });
   }
   return (
     <Modal title="Add role" onClose={onClose}

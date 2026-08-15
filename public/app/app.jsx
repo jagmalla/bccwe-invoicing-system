@@ -154,7 +154,8 @@ function App() {
   }, []);
   const pushToast = (msg) => setToast(msg);
 
-  const [base, param] = route.split("/");
+  const [base, ...restSeg] = route.split("/");
+  const param = restSeg.join("/"); // ids may contain "/" — keep every segment
   const navActive = base === "invoiceview" ? "history" : base === "client" ? "people" : (base === "purchase" || base === "po" || base === "receive") ? "inventory" : base;
   const active = NAV.find((n) => n.id === navActive) || NAV[0];
   const crumbLabel = base === "invoiceview" ? "Invoice " + param

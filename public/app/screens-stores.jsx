@@ -24,8 +24,12 @@ function Stores({ pushToast }) {
     bump(); setModal(null);
   }
   function deleteStore(s) {
-    const used = (D.invoices || []).some((i) => i.companyId === s.id);
-    if (used) { pushToast && pushToast("Can't delete — invoices exist for " + s.name); setModal(null); return; }
+    // Count FALLBACK ownership too: records with no companyId belong to the
+    // default store via STORES.idOf — the strict check missed them, so deleting
+    // the default store silently re-homed every legacy invoice to another store.
+    const owns = (r) => (window.STORES ? window.STORES.idOf(r) : r.companyId) === s.id;
+    const used = (D.invoices || []).some(owns) || (D.cashSales || []).some(owns) || (D.purchaseOrders || []).some(owns);
+    if (used) { pushToast && pushToast("Can't delete — invoices or sales belong to " + s.name + " (including older records that default to it)"); setModal(null); return; }
     if ((D.companies || []).length <= 1) { pushToast && pushToast("Keep at least one store"); setModal(null); return; }
     D.companies = D.companies.filter((x) => x.id !== s.id);
     window.logAudit("DELETE", "Store", "companies", s.name, "Deleted store " + s.name);

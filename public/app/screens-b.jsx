@@ -1712,9 +1712,10 @@ function ItemViewModal({ item, onClose, onEdit }) {
   const D = BCCWE;
   const sales = D.itemSales.filter((s) => s.code === item.code);
   const units = sales.reduce((s, r) => s + r.qty, 0);
-  const revenue = units * item.price;
-  const cogs = units * item.cost;
-  const profit = units * (item.price - item.cost);
+  // Recorded sale figures, not the current list price/cost.
+  const revenue = sales.reduce((s, r) => s + r.qty * ((r.price != null ? r.price : item.price) * (1 - ((r.disc || 0) / 100))), 0);
+  const cogs = sales.reduce((s, r) => s + r.qty * (r.cost != null ? r.cost : item.cost), 0);
+  const profit = revenue - cogs;
   const margin = item.price - item.cost;
   const mpct = item.price ? Math.round((margin / item.price) * 100) : 0;
 
@@ -1879,7 +1880,11 @@ function InventoryProfit() {
     if (!inRange(s.date, range)) return;
     const it = itemByCode(s.code); if (!it) return;
     const m = agg[s.code] || (agg[s.code] = { code: s.code, name: it.name, cat: it.cat, price: it.price, cost: it.cost, units: 0, revenue: 0, profit: 0 });
-    m.units += s.qty; m.revenue += s.qty * it.price; m.profit += s.qty * (it.price - it.cost);
+    // Use the RECORDED sale price/discount/cost, not the live catalogue values —
+    // otherwise "historical" revenue changes whenever a price is edited.
+    const price = (s.price != null ? s.price : it.price) * (1 - ((s.disc || 0) / 100));
+    const cost = s.cost != null ? s.cost : it.cost;
+    m.units += s.qty; m.revenue += s.qty * price; m.profit += s.qty * (price - cost);
   });
   const rows = applySort(Object.values(agg), sort, profitSorts);
   const tU = rows.reduce((s, r) => s + r.units, 0);
@@ -1894,7 +1899,9 @@ function InventoryProfit() {
       if (!bk.test(s.date)) return;
       if (focus !== "all" && s.code !== focus) return;
       const it = itemByCode(s.code); if (!it) return;
-      v += s.qty * (it.price - it.cost);
+      const price = (s.price != null ? s.price : it.price) * (1 - ((s.disc || 0) / 100));
+      const cost = s.cost != null ? s.cost : it.cost;
+      v += s.qty * (price - cost);
     });
     return { label: bk.label, value: v };
   });
@@ -2294,8 +2301,12 @@ function QuickSale({ pushToast, onRecorded, store, lockKind }) {
       if (settleDir === "charge" && onAccount > 0.005) activeClient.balance = r2((activeClient.balance || 0) + onAccount);
       else if (settleDir === "refund" && refundToBalance > 0.005) activeClient.balance = Math.max(0, r2((activeClient.balance || 0) - refundToBalance));
     }
-    // Record line sales so price suggestions reflect register sales too.
-    if (activeClientId && useOut) outLines.forEach((l) => { if (l.code && l.qty > 0) D.itemSales.unshift({ date: D.today, code: l.code, clientId: activeClientId, qty: l.qty, price: l.price, disc: 0 }); });
+    // Record line sales so price suggestions reflect register sales too
+    // (cost-at-sale captured for profit analytics).
+    if (activeClientId && useOut) outLines.forEach((l) => { if (l.code && l.qty > 0) D.itemSales.unshift({ date: D.today, code: l.code, clientId: activeClientId, qty: l.qty, price: l.price, disc: 0, cost: (itemByCode(l.code) || {}).cost || 0 }); });
+    // Restocked returns net the item's sales history (negative rows) so
+    // per-item units/revenue/profit stop counting goods that came back.
+    if (activeClientId && useIn) inLines.forEach((l) => { if (l.code && l.qty > 0 && l.disp === "restock") D.itemSales.unshift({ date: D.today, code: l.code, clientId: activeClientId, qty: -l.qty, price: l.price, disc: 0, cost: (itemByCode(l.code) || {}).cost || 0 }); });
     D.cashSales.unshift({ id: "cs" + Date.now(), companyId: companyId || tagStore, clientId: activeClientId || null, date: D.today, client: clientLabel, type, kind, retDisp, item: label, total: +grand.toFixed(2), subtotal: r2(netSub), gst: r2(gst), pst: r2(pst), cogs: r2(costOut - costRestock), defLoss: r2(defLoss), restockingFee: r2(fee), method: methodLabel, sales: ((window.sessionUid && window.sessionUid()) || (window.__session && window.__session.userId) || ""), settle: settleDir, paid: r2(collected), owed: r2(onAccount), lines: useOut ? outLines.filter((l) => l.code && l.qty > 0).map((l) => ({ code: l.code, name: l.desc, qty: l.qty, price: l.price, cost: (itemByCode(l.code) || {}).cost || 0 })) : [] });
     // post a balanced journal entry and adjust account balances
     if (regJ.length) {

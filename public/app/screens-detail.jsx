@@ -189,7 +189,7 @@ function InvoiceDetail({ no, go, pushToast }) {
   async function recordReturn(p) {
     const isReturn = p.mode === "Return";
     // Snapshot everything this touches so a failed save rolls back cleanly.
-    const snapKeys = ["creditNotes", "inventory", "defectiveProducts", "accounts", "invoices", "payments"];
+    const snapKeys = ["creditNotes", "inventory", "defectiveProducts", "accounts", "invoices", "payments", "itemSales"];
     const snap = {};
     try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
     const cn = {
@@ -208,8 +208,12 @@ function InvoiceDetail({ no, go, pushToast }) {
     p.items.forEach((l) => {
       if (!l.code) return;
       const it = D.inventory.find((x) => x.code === l.code);
-      if (p.retDisp === "Inventory" && it) it.stock = (it.stock || 0) + l.qty;
-      else if (p.retDisp === "Defected") {
+      if (p.retDisp === "Inventory" && it) {
+        it.stock = (it.stock || 0) + l.qty;
+        // Net the item's sales history so per-item analytics stop counting
+        // units that came back to the shelf.
+        if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: -l.qty, price: l.price, disc: l.disc || 0, cost: it.cost || 0 });
+      } else if (p.retDisp === "Defected") {
         D.defectiveProducts.unshift({ date: D.today, code: l.code, name: l.desc, qty: l.qty, costLoss: +(((it ? it.cost : l.price * 0.5)) * l.qty).toFixed(2), reason: p.reason || "Returned defective", ref: cn.no, kind: "defective" });
       }
     });
@@ -232,7 +236,7 @@ function InvoiceDetail({ no, go, pushToast }) {
     }
     inv.status = invStatus(inv);
     window.logAudit("CREATE", isReturn ? "Return" : "Exchange", "creditNotes", cn.no, (isReturn ? "Return " : "Exchange ") + cn.no + " against " + inv.no + " · " + fmt(p.refund || Math.abs(p.total)) + (p.restockingFee > 0 ? " · fee " + fmt(p.restockingFee) : ""));
-    const ok = window.persistNow ? await window.persistNow("creditNotes", "inventory", "invoices", "defectiveProducts", "accounts", "payments") : true;
+    const ok = window.persistNow ? await window.persistNow("creditNotes", "inventory", "invoices", "defectiveProducts", "accounts", "payments", "itemSales") : true;
     if (!ok) {
       snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
       pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
@@ -253,7 +257,7 @@ function InvoiceDetail({ no, go, pushToast }) {
       if (!l.code || !(l.qty > 0)) return;
       const it = D.inventory.find((x) => x.code === l.code);
       if (it) it.stock = (it.stock || 0) - l.qty;
-      if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: l.qty, price: l.price, disc: l.disc || 0 });
+      if (inv.clientId) D.itemSales.unshift({ date: D.today, code: l.code, clientId: inv.clientId, qty: l.qty, price: l.price, disc: l.disc || 0, cost: l.cost || 0 });
     });
     inv.kind = "sale";
     inv.status = invStatus(inv); // the deposit now counts as a payment toward the sale
@@ -543,7 +547,7 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
   const exPick = (id, name) => { const h = catalog.find((c) => c.name === name); exUpd(id, h ? { desc: h.name, code: h.code || "", price: h.price } : { desc: name }); };
 
   function submit() {
-    const items = origLines.map((l, i) => ({ code: l.code, desc: l.desc, qty: qtys[i], price: l.price })).filter((l) => l.qty > 0);
+    const items = origLines.map((l, i) => ({ code: l.code, desc: l.desc, qty: qtys[i], price: l.price, disc: l.disc || 0 })).filter((l) => l.qty > 0);
     if (!items.length) return;
     onSubmit({
       mode, retDisp: disp, reason, items,

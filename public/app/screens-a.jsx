@@ -42,29 +42,39 @@ function Dashboard({ go, store }) {
   const match = (r) => !window.STORES || window.STORES.matches(r, sf);
   const invs = D.invoices.filter(match);
   const sales = (D.cashSales || []).filter(match);
-  const outstanding = invs.filter((i) => i.status !== "Paid").reduce((s, i) => s + (i.total - i.paid), 0);
-  const overdue = invs.filter((i) => i.status === "Overdue").reduce((s, i) => s + (i.total - i.paid), 0);
-  // Revenue this month = invoices + cash sales dated in the current month.
+  const cns = (D.creditNotes || []).filter((c) => (typeof cnMatch === "function" ? cnMatch(c, sf) : true));
+  // Order (deposit) invoices aren't receivables or revenue yet; balances are
+  // return-aware via invOpenBalance; "overdue" is DERIVED from the due date
+  // (the stored status was frozen at whatever it was seeded/saved as).
+  const realInvs = invs.filter((i) => i.kind !== "order");
+  const openBal = (i) => (typeof invOpenBalance === "function" ? invOpenBalance(i) : Math.max(0, (i.total || 0) - (i.paid || 0)));
+  const outstanding = realInvs.reduce((s, i) => s + openBal(i), 0);
+  const overdue = realInvs.filter((i) => i.due && i.due < D.today).reduce((s, i) => s + openBal(i), 0);
+  // Revenue this month: PRE-TAX and net of returns (tax collected is not
+  // revenue, and a deposit on an order isn't a sale yet).
   const ym = (D.today || "").slice(0, 7);
+  const inMonth = (d) => (d || "").slice(0, 7) === ym;
   const mtdRevenue =
-    invs.filter((i) => (i.date || "").slice(0, 7) === ym).reduce((s, i) => s + (i.total || 0), 0) +
-    sales.filter((s2) => (s2.date || "").slice(0, 7) === ym).reduce((s, c) => s + (c.total || 0), 0);
+    realInvs.filter((i) => inMonth(i.date)).reduce((s, i) => s + ((i.total || 0) - (i.gst || 0) - (i.pst || 0)), 0) +
+    sales.filter((s2) => inMonth(s2.date)).reduce((s, c) => s + (c.subtotal != null ? c.subtotal : (c.total || 0)), 0) +
+    cns.filter((c) => inMonth(c.date)).reduce((s, c) => s + (c.subtotal || 0), 0);
   const _bal = (typeof storeBalances === "function") ? storeBalances(sf) : { cash: 0 };
   const _fin = (typeof storeFinance === "function") ? storeFinance(sf) : { gst: 0, pst: 0 };
   const cashPos = _bal.cash;
-  const gstDue = _fin.gst;
-  const pstDue = _fin.pst;
+  const taxDue = (_fin.gst || 0) - (_fin.gstITC || 0) + (_fin.pst || 0); // net of input tax credits
   const lowStock = D.inventory.filter((i) => i.kind !== "Service" && (i.alert || 0) > 0 && i.stock <= i.alert);
   const agingStock = D.inventory
     .map((i) => ({ i, age: window.STOCK.ageDays(i), state: window.STOCK.state(i) }))
     .filter((r) => r.state !== "active")
     .sort((a, b) => b.age - a.age);
 
+  // No invented numbers: the old "+12.4%" delta, "2 accounts" and a hardcoded
+  // remittance date were decorative fiction.
   const kpis = [
-    { label: "Revenue — month to date", value: fmt(mtdRevenue), delta: "+12.4%", up: true, ico: "money" },
+    { label: "Revenue — month to date", value: fmt(mtdRevenue), sub: "Pre-tax · net of returns", ico: "money" },
     { label: "Outstanding receivables", value: fmt(outstanding), sub: fmt(overdue) + " overdue", ico: "invoice", warn: overdue > 0 },
-    { label: "Cash & bank", value: fmt(cashPos), sub: "2 accounts", ico: "ledger" },
-    { label: "GST + PST payable", value: fmt(gstDue + pstDue), sub: "Next remittance Jul 31", ico: "receipt" },
+    { label: "Cash & bank", value: fmt(cashPos), sub: "Collected to date", ico: "ledger" },
+    { label: "GST + PST payable", value: fmt(taxDue), sub: "Net of input tax credits", ico: "receipt" },
   ];
 
   // Real last-12-weeks revenue (invoices + cash sales); flat when there's no data yet.
@@ -75,9 +85,11 @@ function Dashboard({ go, store }) {
     const w = Math.floor((_now - new Date(dateStr + "T00:00:00")) / (7 * 86400000));
     if (w >= 0 && w < 12) spark[11 - w] += amt || 0;
   };
-  invs.forEach((i) => _addWeek(i.date, i.total));
-  sales.forEach((c) => _addWeek(c.date, c.total));
+  realInvs.forEach((i) => _addWeek(i.date, (i.total || 0) - (i.gst || 0) - (i.pst || 0)));
+  sales.forEach((c) => _addWeek(c.date, c.subtotal != null ? c.subtotal : (c.total || 0)));
+  cns.forEach((c) => _addWeek(c.date, c.subtotal || 0));
   const max = Math.max(...spark, 1);
+  const _mLbl = (weeksAgo) => { const d = new Date(_now); d.setDate(d.getDate() - weeksAgo * 7); return d.toLocaleDateString("en-CA", { month: "short" }); };
 
   return (
     <div>
@@ -107,12 +119,12 @@ function Dashboard({ go, store }) {
           actions={<Badge tone="green" dot>On track</Badge>}>
           <div className="spark">
             {spark.map((v, i) => (
-              <div className="spark-bar" key={i} style={{ height: (v / max) * 100 + "%" }} title={fmt(v * 1000)}>
+              <div className="spark-bar" key={i} style={{ height: (v / max) * 100 + "%" }} title={fmt(v)}>
                 <i style={{ height: ((v - (i ? spark[i - 1] : v) + 6) / 12) * 0 + "%" }} />
               </div>
             ))}
           </div>
-          <div className="spark-x"><span>Mar</span><span>Apr</span><span>May</span><span>Jun</span></div>
+          <div className="spark-x"><span>{_mLbl(11)}</span><span>{_mLbl(7)}</span><span>{_mLbl(3)}</span><span>{_mLbl(0)}</span></div>
         </Card>
 
         <Card title="Cash position" sub="Where money sits right now">
@@ -315,7 +327,7 @@ function buildInvoiceImport(objs, companyId) {
       const payDate = normDate(g.rows.map((r) => norm(r.paydate)).find(Boolean) || "") || g.date;
       payments.push({ id: "p_imp" + Date.now().toString(36) + "_" + gi, date: payDate, inv: g.no, clientId: client.id, amount: paid, method: "Historical import", acct: "1010" });
     }
-    lines.forEach((l) => { if (l.qty > 0 && l.code && itemsByCode[lc(l.code)] && (D.inventory || []).some((x) => x.code === l.code)) itemSales.push({ date: g.date, code: l.code, clientId: client.id, qty: l.qty, price: l.price, disc: l.disc || 0 }); });
+    lines.forEach((l) => { if (l.qty > 0 && l.code && itemsByCode[lc(l.code)] && (D.inventory || []).some((x) => x.code === l.code)) itemSales.push({ date: g.date, code: l.code, clientId: client.id, qty: l.qty, price: l.price, disc: l.disc || 0, cost: l.cost || 0 }); });
   });
 
   return { invoices, newClients, payments, itemSales, lineCount,
@@ -413,7 +425,13 @@ function InvoiceHistory({ go, pushToast, store }) {
     const register = D.cashSales.map((s) => ({
       ...s, txn: s.kind, doc: s.ref || ("REG-" + String(s.id).replace(/\D/g, "").slice(-5)),
       register: true, clientLabel: s.client, regClientId: s.clientId || null, clientId: null, no: null, origInv: null, due: null,
-      paid: s.total, balance: 0, subtotal: s.total, status: s.total < 0 ? "Refunded" : "Paid",
+      // Use the register's REAL figures: pre-tax subtotal, collected vs owed —
+      // previously the tax-inclusive total overwrote the subtotal and every
+      // partially-paid register sale displayed as fully Paid.
+      paid: s.paid != null ? s.paid : s.total,
+      balance: s.owed || 0,
+      subtotal: s.subtotal != null ? s.subtotal : s.total,
+      status: s.total < 0 ? "Refunded" : (s.owed || 0) > 0.005 ? "Partially Paid" : "Paid",
     }));
     let all = [...sale, ...credits, ...register];
     // A client login only ever sees its own documents.
@@ -709,7 +727,11 @@ function People({ go, pushToast }) {
     if (!inRange(s.date, range)) return;
     const it = itemByCode(s.code); if (!it) return;
     const a = agg[s.clientId] || (agg[s.clientId] = { rev: 0, prof: 0 });
-    a.rev += s.qty * it.price; a.prof += s.qty * (it.price - it.cost);
+    // Use the RECORDED sale price/discount/cost — the live catalogue price made
+    // "historical" revenue silently change whenever a price was edited.
+    const price = (s.price != null ? s.price : it.price) * (1 - ((s.disc || 0) / 100));
+    const cost = s.cost != null ? s.cost : it.cost;
+    a.rev += s.qty * price; a.prof += s.qty * (price - cost);
   });
 
   const clientSorts = {
@@ -718,7 +740,7 @@ function People({ go, pushToast }) {
     revenue_desc: { label: "Revenue (period) — high to low", get: (c) => c.prev, dir: "desc" },
     name_asc: { label: "Name — A to Z", get: (c) => c.name, dir: "asc" },
     name_desc: { label: "Name — Z to A", get: (c) => c.name, dir: "desc" },
-    balance_desc: { label: "A/R balance — high to low", get: (c) => c.balance, dir: "desc" },
+    balance_desc: { label: "A/R balance — high to low", get: (c) => c.arBal || 0, dir: "desc" },
     type_asc: { label: "Type — Retail/Wholesale", get: (c) => c.type, dir: "asc" },
   };
   const supplierSorts = {
@@ -729,7 +751,11 @@ function People({ go, pushToast }) {
     terms_asc: { label: "Terms — A to Z", get: (s) => s.terms, dir: "asc" },
   };
   const pqLower = pq.trim().toLowerCase();
-  const clientsAll = applySort(D.clients.map((c) => ({ ...c, prev: (agg[c.id] && agg[c.id].rev) || 0, pprof: (agg[c.id] && agg[c.id].prof) || 0 })), csort, clientSorts);
+  // A/R derived from the invoices (return-aware), NOT the stored clients[].balance
+  // field — nothing maintains that field on invoice creation, so it drifts.
+  const _arOf = (cid) => (D.invoices || []).reduce((s, i) =>
+    s + (i.clientId === cid && i.kind !== "order" && typeof invOpenBalance === "function" ? invOpenBalance(i) : 0), 0);
+  const clientsAll = applySort(D.clients.map((c) => ({ ...c, prev: (agg[c.id] && agg[c.id].rev) || 0, pprof: (agg[c.id] && agg[c.id].prof) || 0, arBal: _arOf(c.id) })), csort, clientSorts);
   const suppliersAll = applySort(D.suppliers, ssort, supplierSorts);
   const clients = pqLower
     ? clientsAll.filter((c) => {
@@ -853,7 +879,9 @@ function People({ go, pushToast }) {
       if (!bk.test(s.date)) return;
       if (cfocus !== "all" && s.clientId !== cfocus) return;
       const it = itemByCode(s.code); if (!it) return;
-      v += s.qty * (it.price - it.cost);
+      const price = (s.price != null ? s.price : it.price) * (1 - ((s.disc || 0) / 100));
+      const cost = s.cost != null ? s.cost : it.cost;
+      v += s.qty * (price - cost);
     });
     return { label: bk.label, value: v };
   });
@@ -903,7 +931,7 @@ function People({ go, pushToast }) {
                   <td className="muted">{c.terms}</td>
                   <td className="r mono">{c.prev > 0 ? fmt(c.prev) : "—"}</td>
                   <td className="r mono">{c.pprof > 0 ? <span className="pos strong">{fmt(c.pprof)}</span> : "—"}</td>
-                  <td className="r mono">{c.balance > 0 ? fmt(c.balance) : "—"}</td>
+                  <td className="r mono">{c.arBal > 0.005 ? fmt(c.arBal) : "—"}</td>
                   <td>{bccweIsAdmin() ? <Btn variant={hasLogin ? "ghost" : "default"} size="sm" icon="lock" onClick={() => setLoginClient(c)}>{hasLogin ? "Manage" : "Create"}</Btn> : (hasLogin ? <Badge tone="green" dot>Has login</Badge> : <span className="muted">—</span>)}</td>
                 </tr>
                 );
