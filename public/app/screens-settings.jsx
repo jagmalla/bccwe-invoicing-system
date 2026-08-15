@@ -158,10 +158,12 @@ function WhatsAppCard({ pushToast }) {
   const set = (k) => (e) => { wc[k] = e.target.value; rr(); };
   function save() { if (window.persist) window.persist("waConfig"); pushToast && pushToast("WhatsApp settings saved"); }
   function test() {
-    if (!wc.token || !wc.phoneId) { setConn({ state: "fail", msg: "Enter the access token and phone number ID first." }); return; }
+    // The saved token is redacted out of the client, so only require the phone
+    // number ID here — the server fills the token from the stored config.
+    if (!wc.phoneId) { setConn({ state: "fail", msg: "Enter the phone number ID first." }); return; }
     setConn({ state: "testing" });
     if (window.persist) window.persist("waConfig");
-    fetch("/api/test-whatsapp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: wc.token, phoneId: wc.phoneId }) })
+    fetch("/api/test-whatsapp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: wc.token || "", phoneId: wc.phoneId }) })
       .then((r) => r.json())
       .then((r) => { setConn(r.ok ? { state: "ok", msg: r.message } : { state: "fail", msg: r.error || "Connection failed" }); pushToast && pushToast(r.ok ? "WhatsApp connected" : "WhatsApp test failed"); })
       .catch((e) => setConn({ state: "fail", msg: "Could not reach the server: " + (e && e.message) }));
@@ -270,8 +272,9 @@ function EmailSettings({ pushToast }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        id: draft.id,
         host: draft.host, port: draft.port, enc: draft.enc,
-        user: draft.user, password: draft.password,
+        user: draft.user, password: draft.password || "", // blank → server fills the saved password
       }),
     })
       .then((r) => r.json())

@@ -7,10 +7,14 @@
 function ClientShop({ pushToast, go }) {
   const D = BCCWE;
   if (!Array.isArray(D.catTree)) D.catTree = (D.categories || []).map((n) => ({ name: n, subs: [] }));
-  const session = window.__session || {};
-  const me = (D.users || []).find((u) => u.id === session.userId);
-  const fixedClientId = me && me.clientId;
-  const [clientId, setClientId] = useState(fixedClientId || ((D.clients[0] && D.clients[0].id) || ""));
+  const isClient = window.isClientUser ? window.isClientUser() : false;
+  // sessionClientId() reliably resolves the client this login represents (by uid,
+  // email or name). The old lookup matched user.id against session.userId — but
+  // session.userId is the email/name, so it never matched, `fixedClientId` was
+  // always empty, and a client login defaulted to D.clients[0] — showing (and
+  // ordering at) ANOTHER client's prices. Lock a client login to its own account.
+  const fixedClientId = window.sessionClientId ? window.sessionClientId() : "";
+  const [clientId, setClientId] = useState(fixedClientId || (isClient ? "" : ((D.clients[0] && D.clients[0].id) || "")));
   const [cat, setCat] = useState((D.catTree[0] && D.catTree[0].name) || "All");
   const [sub, setSub] = useState("All");
   const [qtys, setQtys] = useState({});      // { code: qty } for the current selection
@@ -87,7 +91,7 @@ function ClientShop({ pushToast, go }) {
   return (
     <div>
       <PageHead title="New Order" sub="Choose a category, set quantities, add to cart, then check out."
-        actions={!fixedClientId ? (
+        actions={!isClient && !fixedClientId ? (
           <Field label="">
             <select value={clientId} onChange={(e) => { setClientId(e.target.value); setCart([]); }}>
               {D.clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}

@@ -14,6 +14,7 @@ function Orders({ go, pushToast }) {
   const D = BCCWE;
   // A client login only sees its own orders; staff/admins see everything.
   const _clientId = window.sessionClientId ? window.sessionClientId() : "";
+  const isClient = window.isClientUser ? window.isClientUser() : false;
   const base = _clientId ? D.orders.filter((o) => o.clientId === _clientId) : D.orders;
   const [tab, setTab] = useState("all");
   const [, setRev] = useState(0);
@@ -127,6 +128,7 @@ function Orders({ go, pushToast }) {
   );
 
   const actionsFor = (o) => {
+    if (isClient) return null; // clients don't drive the supplier-side lifecycle
     if (o.status === "Ordering") return <>
       {!o.paid && <button className="icon-btn" title="Mark paid" onClick={() => markPaid(o)}><Icon name="money" size={15} /></button>}
       <Btn variant="primary" size="sm" icon="check" onClick={() => markOrdered(o)}>Mark Ordered</Btn>
@@ -142,7 +144,7 @@ function Orders({ go, pushToast }) {
       <PageHead title="Client Orders" sub={base.length + " orders · " + inProgress.length + " in progress · " + awaiting.length + " awaiting receipt"}
         actions={<>
           {(typeof navAllowed !== "function" || navAllowed("neworder")) && <Btn variant="primary" icon="cart" onClick={() => go("neworder")}>New order (catalog)</Btn>}
-          <Btn variant="ghost" icon="plus" onClick={() => setModal({ type: "new" })}>Add order</Btn>
+          {!isClient && <Btn variant="ghost" icon="plus" onClick={() => setModal({ type: "new" })}>Add order</Btn>}
         </>} />
 
       <div className="portal-banner">
@@ -193,8 +195,8 @@ function Orders({ go, pushToast }) {
                         <Icon name="book" size={15} />
                         {(((o.privateComments || []).length) + ((o.clientComments || []).length)) > 0 && <em className="act-count">{((o.privateComments || []).length) + ((o.clientComments || []).length)}</em>}
                       </button>
-                      <button className="icon-btn" title="Edit order" onClick={() => setModal({ type: "edit", order: o })}><Icon name="edit" size={15} /></button>
-                      <button className="icon-btn danger" title="Delete order" onClick={() => setModal({ type: "delete", order: o })}><Icon name="trash" size={15} /></button>
+                      {!isClient && <button className="icon-btn" title="Edit order" onClick={() => setModal({ type: "edit", order: o })}><Icon name="edit" size={15} /></button>}
+                      {!isClient && <button className="icon-btn danger" title="Delete order" onClick={() => setModal({ type: "delete", order: o })}><Icon name="trash" size={15} /></button>}
                     </td>
                   </tr>
                 );
@@ -212,7 +214,7 @@ function Orders({ go, pushToast }) {
       {(modal && modal.type === "delete") && <DeleteOrderModal order={modal.order} onConfirm={() => deleteOrder(modal.order)} onClose={close} />}
       {(modal && modal.type === "transit") && <TransitModal order={modal.order} onSave={(t) => setTransit(modal.order, t)} onClose={close} />}
       {(modal && modal.type === "receive") && <ReceiveModal order={modal.order} onConfirm={(r) => receiveOrder(modal.order, r)} onClose={close} />}
-      {(modal && modal.type === "view") && <OrderViewModal order={modal.order} focus={modal.focus} onClose={close}
+      {(modal && modal.type === "view") && <OrderViewModal order={modal.order} focus={modal.focus} onClose={close} isClient={isClient}
         onAdvance={() => { const o = modal.order; if (o.status === "Ordering") markOrdered(o); else if (o.status === "Ordered") setModal({ type: "transit", order: o }); else if (o.status === "In Transit") setModal({ type: "receive", order: o }); }}
         onResolve={() => receiveRemaining(modal.order)} onPaid={() => markPaid(modal.order)}
         onEdit={() => setModal({ type: "edit", order: modal.order })} onDelete={() => setModal({ type: "delete", order: modal.order })}
@@ -426,7 +428,7 @@ function ReceiveModal({ order, onConfirm, onClose }) {
 }
 
 /* ---------------- Order detail ---------------- */
-function OrderViewModal({ order, focus, onClose, onAdvance, onResolve, onPaid, onEdit, onDelete, onAddComment, onRemoveComment, go }) {
+function OrderViewModal({ order, focus, onClose, onAdvance, onResolve, onPaid, onEdit, onDelete, onAddComment, onRemoveComment, go, isClient }) {
   const o = order;
   const recv = orderReceived(o);
   const short = shortfallLines(o);
@@ -446,11 +448,11 @@ function OrderViewModal({ order, focus, onClose, onAdvance, onResolve, onPaid, o
     <Modal title={o.id} onClose={onClose} wide
       footer={<>
         <Btn variant="ghost" onClick={onClose}>Close</Btn>
-        <Btn variant="ghost" icon="trash" onClick={onDelete}>Delete</Btn>
-        <Btn variant="ghost" icon="edit" onClick={onEdit}>Edit</Btn>
-        {!o.paid && <Btn variant="ghost" icon="money" onClick={onPaid}>Mark paid</Btn>}
-        {advanceLabel && <Btn variant="primary" icon="check" onClick={onAdvance}>{advanceLabel}</Btn>}
-        {o.status === "Discrepancy" && <Btn variant="primary" icon="check" onClick={onResolve}>Receive remaining</Btn>}
+        {!isClient && <Btn variant="ghost" icon="trash" onClick={onDelete}>Delete</Btn>}
+        {!isClient && <Btn variant="ghost" icon="edit" onClick={onEdit}>Edit</Btn>}
+        {!isClient && !o.paid && <Btn variant="ghost" icon="money" onClick={onPaid}>Mark paid</Btn>}
+        {!isClient && advanceLabel && <Btn variant="primary" icon="check" onClick={onAdvance}>{advanceLabel}</Btn>}
+        {!isClient && o.status === "Discrepancy" && <Btn variant="primary" icon="check" onClick={onResolve}>Receive remaining</Btn>}
       </>}>
       <div className="iv-head">
         <div><h4 className="iv-name">{clientName(o.clientId)}</h4><span className="cat-tag">{o.portal ? "Client portal order" : "Manual order"}</span></div>
@@ -492,14 +494,15 @@ function OrderViewModal({ order, focus, onClose, onAdvance, onResolve, onPaid, o
         <tfoot><tr><td colSpan={(o.status === "Received" || o.status === "Discrepancy") ? 4 : 3}>{o.lines.length} lines · {orderUnits(o)} units{(o.status === "Received" || o.status === "Discrepancy") ? " · " + recv + " received" : ""}</td><td className="r mono strong">{fmt(orderSubtotal(o))}</td></tr></tfoot>
       </table>
 
-      <OrderComments order={o} focus={focus} onAdd={onAddComment} onRemove={onRemoveComment} />
+      <OrderComments order={o} focus={focus} onAdd={onAddComment} onRemove={onRemoveComment} isClient={isClient} />
     </Modal>
   );
 }
 
 /* ---------------- Order comments (private + client-visible) ---------------- */
-function OrderComments({ order, focus, onAdd, onRemove }) {
-  const [kind, setKind] = useState("private");
+function OrderComments({ order, focus, onAdd, onRemove, isClient }) {
+  // A client login must never see the private (staff-only) notes.
+  const [kind, setKind] = useState(isClient ? "client" : "private");
   const [text, setText] = useState("");
   const ref = useRef(null);
   useEffect(() => { if (focus === "comments" && ref.current) ref.current.focus(); }, [focus]);
@@ -510,16 +513,16 @@ function OrderComments({ order, focus, onAdd, onRemove }) {
     <div className="ord-comments">
       <h5 className="iv-sec">Comments</h5>
       <div className="oc-tabs">
-        <button className={"oc-tab" + (kind === "private" ? " on" : "")} onClick={() => setKind("private")}>
+        {!isClient && <button className={"oc-tab" + (kind === "private" ? " on" : "")} onClick={() => setKind("private")}>
           <Icon name="lock" size={14} /> Private <em>{(order.privateComments || []).length}</em>
-        </button>
+        </button>}
         <button className={"oc-tab" + (kind === "client" ? " on" : "")} onClick={() => setKind("client")}>
-          <Icon name="eye" size={14} /> Client-visible <em>{(order.clientComments || []).length}</em>
+          <Icon name="eye" size={14} /> {isClient ? "Messages" : "Client-visible"} <em>{(order.clientComments || []).length}</em>
         </button>
       </div>
       <div className={"oc-banner oc-" + kind}>
         <Icon name={kind === "private" ? "lock" : "user"} size={14} />
-        {kind === "private" ? "Internal notes — visible to staff only. The client never sees these." : "Visible to the client on their order in the portal."}
+        {kind === "private" ? "Internal notes — visible to staff only. The client never sees these." : (isClient ? "Messages between you and BCCWE about this order." : "Visible to the client on their order in the portal.")}
       </div>
       <div className="oc-list">
         {list.length === 0 && <div className="oc-empty">No {kind === "private" ? "private" : "client"} comments yet.</div>}
@@ -527,7 +530,7 @@ function OrderComments({ order, focus, onAdd, onRemove }) {
           <div className="oc-item" key={i}>
             <div className="oc-meta"><strong>{c.by || "You"}</strong><span>{shortDate(c.at)}</span></div>
             <p className="oc-text">{c.text}</p>
-            <button className="icon-btn oc-del" title="Delete comment" onClick={() => onRemove(order, kind, i)}><Icon name="trash" size={14} /></button>
+            {!isClient && <button className="icon-btn oc-del" title="Delete comment" onClick={() => onRemove(order, kind, i)}><Icon name="trash" size={14} /></button>}
           </div>
         ))}
       </div>

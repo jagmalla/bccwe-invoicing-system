@@ -431,10 +431,10 @@
     var wc = window.BCCWE.waConfig || {};
     var num = window.waNumber(ent);
     if (!num) return "";
-    if (wc.enabled && wc.token && wc.phoneId) {
+    if (wc.enabled && wc.phoneId) { // token is held server-side and filled in there
       fetch("/api/send-whatsapp", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: wc.token, phoneId: wc.phoneId, to: num, message: message || "" }),
+        body: JSON.stringify({ token: wc.token || "", phoneId: wc.phoneId, to: num, message: message || "" }),
       }).then(function (r) { return r.json(); }).then(function (r) { if (cb) cb(r); })
         .catch(function (e) { if (cb) cb({ ok: false, error: e.message }); });
       return "api";
@@ -821,8 +821,9 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         profile: {
+          id: prof.id,
           host: prof.host, port: prof.port, enc: prof.enc,
-          user: prof.user, password: prof.password,
+          user: prof.user, password: prof.password || "", // blank → server fills from stored profile
           from: prof.from, fromName: prof.fromName, replyTo: prof.replyTo,
         },
         to: entry.to || [],

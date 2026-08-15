@@ -60,7 +60,7 @@ function itemAvgCost(item) {
 // Double-click-to-edit money cell (admin only) for quick bulk price/cost work
 // on the stock list — no modal round-trip. Enter or clicking away saves; Esc
 // cancels. Non-admins just see the plain value.
-function EditCell({ canEdit, value, display, title, onSave }) {
+function EditCell({ canEdit, value, display, title, onSave, allowNeg, integer }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState("");
   const ref = useRef(null);
@@ -78,13 +78,15 @@ function EditCell({ canEdit, value, display, title, onSave }) {
     if (!editing) return;
     setEditing(false);
     const n = parseFloat(val);
-    if (isNaN(n) || n < 0) return;           // invalid input → keep the old value
-    const r = Math.round(n * 100) / 100;
-    if (Math.abs(r - (value || 0)) < 0.005) return; // unchanged
+    if (isNaN(n)) return;                     // invalid input → keep the old value
+    if (!allowNeg && n < 0) return;           // negatives not permitted for this field
+    const r = integer ? Math.round(n) : Math.round(n * 100) / 100;
+    const tol = integer ? 0.5 : 0.005;
+    if (Math.abs(r - (value || 0)) < tol) return; // unchanged
     onSave(r);
   };
   return (
-    <input ref={ref} type="number" min="0" step="0.01" value={val}
+    <input ref={ref} type="number" min={allowNeg ? undefined : "0"} step={integer ? "1" : "0.01"} value={val}
       onChange={(e) => setVal(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => { if (e.key === "Enter") commit(); else if (e.key === "Escape") setEditing(false); }}
@@ -198,10 +200,13 @@ function Inventory({ go, pushToast }) {
   function inlineUpdate(item, field, v) {
     const old = item[field] || 0;
     item[field] = v;
+    const label = field === "price" ? "Price" : field === "cost" ? "Cost" : "Stock";
+    const money = field !== "stock";
+    const show = (n) => money ? fmt(n) : String(n);
     window.logAudit("UPDATE", "Product", "inventory_items", item.code,
-      (field === "price" ? "Price " : "Cost ") + item.code + " " + fmt(old) + " → " + fmt(v) + " (quick edit)");
+      label + " " + item.code + " " + show(old) + " → " + show(v) + " (quick edit)");
     if (window.persist) window.persist("inventory");
-    pushToast && pushToast(item.code + (field === "price" ? " price " : " cost ") + fmt(old) + " → " + fmt(v));
+    pushToast && pushToast(item.code + " " + label.toLowerCase() + " " + show(old) + " → " + show(v));
     bump();
   }
 
@@ -459,7 +464,7 @@ function Inventory({ go, pushToast }) {
                     <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(itemAvgCost(i).last)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>
                     <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.price} display={fmt(i.price)} title="Double-click to edit price" onSave={(v) => inlineUpdate(i, "price", v)} /></td>
                     <td className="r mono"><span className="pos">{fmt(margin)}</span> <em className="mpct">{mpct}%</em></td>
-                    <td className="r mono strong">{i.stock}</td>
+                    <td className="r mono strong"><EditCell canEdit={_canInlineEdit && i.kind !== "Service"} value={i.stock} display={i.stock} title="Double-click to edit stock" onSave={(v) => inlineUpdate(i, "stock", v)} allowNeg integer /></td>
                     <td><AgeCell item={i} /></td>
                     <td><MoveBadge item={i} /></td>
                     <td className="stk-status">

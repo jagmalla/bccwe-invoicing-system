@@ -103,6 +103,13 @@ async function initDb() {
 function hashPw(password, salt) {
   return crypto.scryptSync(String(password), salt, 64).toString("hex");
 }
+// Constant-time compare of two hex hash strings (avoids leaking, via response
+// timing, how much of a hash matched).
+function hashEqual(a, b) {
+  const ba = Buffer.from(String(a || ""), "utf8");
+  const bb = Buffer.from(String(b || ""), "utf8");
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
 function getAuth() {
   return pool.query("SELECT * FROM auth WHERE id = 1").then(function (r) { return r[0][0]; });
 }
@@ -127,8 +134,73 @@ function requireAuth(req, res, next) {
   // The tab-close save uses navigator.sendBeacon, which cannot set headers —
   // it carries the same session token as a ?t= query parameter instead.
   const token = req.headers["x-auth-token"] || (req.query && req.query.t) || "";
-  if (validToken(token)) return next();
+  if (validToken(token)) { req.authSession = sessions.get(token); return next(); }
   res.status(401).json({ error: "auth_required" });
+}
+
+// ---- server-side write authorization ----
+// The client can be tampered with, so the browser's role checks are not enough:
+// re-check every write here. Two principals matter most — a Client-portal login
+// (least trusted, external) and any non-admin trying to rewrite security
+// definitions or settings they don't have permission for.
+function isAdminSession(s) {
+  return !!(s && (s.isOwner === true
+    || String(s.role || "").toLowerCase() === "admin"
+    || s.roleId === "r_admin" || s.roleId === "r_owner"));
+}
+function isClientSession(s) {
+  if (!s || s.isOwner) return false;
+  if (s.roleId === "r_client" || String(s.role || "").toLowerCase() === "client") return true;
+  return !!s.clientId;
+}
+// Client-portal logins may only ever write their own orders. Everything else a
+// client "saves" (audit/download logs picked up by the autosave net) is dropped.
+const CLIENT_WRITABLE = new Set(["orders"]);
+// Collections a non-admin may write only with the matching permission. "admin"
+// means owner/Admin only (security definitions no role's permissions grant).
+const SENSITIVE_WRITES = {
+  roles: "admin",
+  modules: "admin",
+  users: ["settings", "users"],
+  company: ["settings", "company"],
+  companies: ["settings", "company"],
+  TAX: ["settings", "company"],
+  smtpProfiles: ["settings", "email"],
+  waConfig: ["settings", "email"],
+  accounts: ["accounting", "coa"],
+};
+// Split a save body into the collections this session is allowed to write and
+// the ones it isn't. Non-2xx would make the client retry the whole batch
+// forever, so we DROP disallowed collections and still return ok.
+async function authorizeWrites(session, body) {
+  const allowed = {}, dropped = [];
+  const isClient = isClientSession(session);
+  const isAdmin = isAdminSession(session);
+  let rolesCache = null;
+  if (!isClient && !isAdmin) rolesCache = (await getCollectionSafe("roles")) || [];
+  for (const [name, data] of Object.entries(body || {})) {
+    let ok;
+    if (isClient) {
+      ok = CLIENT_WRITABLE.has(name);
+    } else if (isAdmin) {
+      ok = true;
+    } else {
+      const rule = SENSITIVE_WRITES[name];
+      if (!rule) ok = true;
+      else if (rule === "admin") ok = false;
+      else {
+        const role = rolesCache.find(function (r) { return r.id === (session && session.roleId); });
+        const perms = role && role.perms;
+        ok = !!(perms && perms[rule[0]] && perms[rule[0]][rule[1]]);
+      }
+    }
+    if (ok) allowed[name] = data; else dropped.push(name);
+  }
+  if (dropped.length) {
+    console.warn("Blocked unauthorized write to [" + dropped.join(", ") + "] by " +
+      ((session && (session.userId || session.name)) || "unknown") + " (role " + ((session && session.role) || "?") + ")");
+  }
+  return { allowed, dropped };
 }
 
 async function saveCollection(name, data) {
@@ -161,37 +233,88 @@ async function getCollectionSafe(name) {
   } catch (e) { return null; }
 }
 
-// Remove staff login passwords from the full-state payload sent to the browser.
-// They are only ever needed server-side (login checks them against the DB), so
-// the client never needs to see them — previously ANY logged-in user could read
-// every staff password out of /api/state and sign in as an admin.
+// Strip every secret from the full-state payload sent to the browser. These are
+// only ever needed server-side (SMTP send, WhatsApp send, login checks), so the
+// client never needs them — previously ANY logged-in user could read every staff
+// password, SMTP password and WhatsApp token straight out of /api/state and sign
+// in as an admin or hijack the mail/WhatsApp accounts.
 function redactForClient(state) {
-  if (state && Array.isArray(state.users)) {
+  if (!state) return state;
+  if (Array.isArray(state.users)) {
     state.users = state.users.map(function (u) { return Object.assign({}, u, { password: "" }); });
+  }
+  if (Array.isArray(state.smtpProfiles)) {
+    state.smtpProfiles = state.smtpProfiles.map(function (p) { return Object.assign({}, p, { password: "" }); });
+  }
+  if (state.waConfig && typeof state.waConfig === "object" && !Array.isArray(state.waConfig)) {
+    state.waConfig = Object.assign({}, state.waConfig, { token: "" });
   }
   return state;
 }
-// The client saves the whole `users` collection back with blank (redacted)
-// passwords. Re-fill each blank password from the stored value so a normal save
-// never wipes a staff password. A non-blank password (a real change) passes
-// through untouched. Match on id, then email, then name.
+// The client saves collections back with their secrets blanked (redacted above).
+// Re-fill each blank secret from the stored value so a normal save never wipes a
+// staff password, SMTP password or WhatsApp token. A non-blank value (a real
+// change the user just typed) passes through untouched.
 async function preserveUserSecrets(name, data) {
-  if (name !== "users" || !Array.isArray(data)) return data;
-  const existing = (await getCollectionSafe("users")) || [];
-  const findExisting = function (u) {
-    return existing.find(function (e) {
-      return (u.id && e.id === u.id)
-        || (u.email && e.email && String(e.email).toLowerCase() === String(u.email).toLowerCase())
-        || (u.name && e.name && String(e.name).toLowerCase() === String(u.name).toLowerCase());
+  if (name === "users" && Array.isArray(data)) {
+    const existing = (await getCollectionSafe("users")) || [];
+    const findExisting = function (u) {
+      return existing.find(function (e) {
+        return (u.id && e.id === u.id)
+          || (u.email && e.email && String(e.email).toLowerCase() === String(u.email).toLowerCase())
+          || (u.name && e.name && String(e.name).toLowerCase() === String(u.name).toLowerCase());
+      });
+    };
+    data.forEach(function (u) {
+      if (u && (u.password === "" || u.password == null)) {
+        const e = findExisting(u);
+        if (e && e.password) u.password = e.password;
+      }
     });
-  };
-  data.forEach(function (u) {
-    if (u && (u.password === "" || u.password == null)) {
-      const e = findExisting(u);
-      if (e && e.password) u.password = e.password;
+    return data;
+  }
+  if (name === "smtpProfiles" && Array.isArray(data)) {
+    const existing = (await getCollectionSafe("smtpProfiles")) || [];
+    data.forEach(function (p) {
+      if (p && (p.password === "" || p.password == null)) {
+        const e = existing.find(function (x) {
+          return (p.id && x.id === p.id)
+            || (p.host && p.user && x.host === p.host && String(x.user).toLowerCase() === String(p.user).toLowerCase());
+        });
+        if (e && e.password) p.password = e.password;
+      }
+    });
+    return data;
+  }
+  if (name === "waConfig" && data && typeof data === "object" && !Array.isArray(data)) {
+    if (data.token === "" || data.token == null) {
+      const e = (await getCollectionSafe("waConfig")) || {};
+      if (e.token) data.token = e.token;
     }
-  });
+    return data;
+  }
   return data;
+}
+
+// Fill a possibly-redacted SMTP password from the stored profile, so the browser
+// never has to hold it. Match the stored profile by id first, then by host+user.
+// A non-blank incoming password (a profile being configured) is used as-is.
+async function fillSmtpSecret(profile) {
+  const p = Object.assign({}, profile || {});
+  if (p.password) return p;
+  const stored = (await getCollectionSafe("smtpProfiles")) || [];
+  const match = stored.find(function (s) {
+    return (p.id && s.id === p.id)
+      || (p.host && p.user && s.host === p.host && String(s.user).toLowerCase() === String(p.user).toLowerCase());
+  });
+  if (match && match.password) p.password = match.password;
+  return p;
+}
+// Fill a possibly-redacted WhatsApp token from the stored config.
+async function fillWaToken(token) {
+  if (token) return token;
+  const wc = (await getCollectionSafe("waConfig")) || {};
+  return wc.token || "";
 }
 
 app.get("/api/state", requireAuth, async (_req, res) => {
@@ -209,6 +332,10 @@ app.get("/api/state", requireAuth, async (_req, res) => {
 
 app.post("/api/save/:collection", requireAuth, async (req, res) => {
   try {
+    const { allowed } = await authorizeWrites(req.authSession, { [req.params.collection]: req.body });
+    if (!(req.params.collection in allowed)) {
+      return res.status(403).json({ error: "not_authorized" });
+    }
     await saveCollection(req.params.collection, await preserveUserSecrets(req.params.collection, req.body));
     res.json({ ok: true });
   } catch (e) {
@@ -220,8 +347,9 @@ app.post("/api/save/:collection", requireAuth, async (req, res) => {
 app.post("/api/save-bulk", requireAuth, async (req, res) => {
   const conn = await pool.getConnection();
   try {
+    const { allowed } = await authorizeWrites(req.authSession, req.body);
     await conn.beginTransaction();
-    for (const [name, data] of Object.entries(req.body)) {
+    for (const [name, data] of Object.entries(allowed)) {
       const merged = await preserveUserSecrets(name, data);
       await conn.query(
         "INSERT INTO collections (name, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)",
@@ -242,8 +370,9 @@ app.post("/api/save-bulk", requireAuth, async (req, res) => {
 app.post("/api/state", requireAuth, async (req, res) => {
   const conn = await pool.getConnection();
   try {
+    const { allowed } = await authorizeWrites(req.authSession, req.body);
     await conn.beginTransaction();
-    for (const [name, data] of Object.entries(req.body)) {
+    for (const [name, data] of Object.entries(allowed)) {
       const merged = await preserveUserSecrets(name, data);
       await conn.query(
         "INSERT INTO collections (name, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)",
@@ -467,7 +596,7 @@ function makeTransport(p) {
 // Really connect + authenticate against the SMTP server (no sending).
 app.post("/api/test-smtp", requireAuth, async (req, res) => {
   try {
-    const t = makeTransport(req.body);
+    const t = makeTransport(await fillSmtpSecret(req.body));
     await t.verify();
     res.json({ ok: true, message: "Connected and signed in successfully." });
   } catch (e) {
@@ -478,8 +607,8 @@ app.post("/api/test-smtp", requireAuth, async (req, res) => {
 // Actually send an email through the sender profile's SMTP account.
 app.post("/api/send-mail", requireAuth, async (req, res) => {
   const b = req.body || {};
-  const p = b.profile || {};
   try {
+    const p = await fillSmtpSecret(b.profile || {});
     if (!p.host || !p.user) {
       return res.json({ ok: false, error: "This sender profile is missing its SMTP host or username." });
     }
@@ -521,7 +650,7 @@ app.post("/api/login", async (req, res) => {
 
     // 1) Owner / admin account (auth table).
     const a = await getAuth();
-    if (a && idLc === String(a.userId).toLowerCase() && hashPw(password, a.salt) === a.passHash) {
+    if (a && idLc === String(a.userId).toLowerCase() && hashEqual(hashPw(password, a.salt), a.passHash)) {
       // If the owner account also has a staff/role record, honour that role so
       // permissions follow the assigned role (e.g. owner account used as a salesperson).
       const usersA = (await getCollectionSafe("users")) || [];
@@ -604,7 +733,7 @@ app.post("/api/change-password", requireAuth, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
     const a = await getAuth();
-    if (hashPw(currentPassword, a.salt) !== a.passHash) {
+    if (!hashEqual(hashPw(currentPassword, a.salt), a.passHash)) {
       return res.status(400).json({ ok: false, error: "Current password is incorrect." });
     }
     if (!newPassword || String(newPassword).length < 6) {
@@ -644,7 +773,9 @@ app.post("/api/forgot-password", async (req, res) => {
       const u = users.find((x) => x.active !== false && (given === String(x.email || "").toLowerCase() || given === String(x.name || "").toLowerCase()));
       if (u) targetEmail = u.email;
     }
-    if (!targetEmail) return res.json({ ok: false, error: "No account with a recovery email matches that ID." });
+    // Do not reveal whether an account exists (avoids account enumeration):
+    // respond with the same generic success message as a real send.
+    if (!targetEmail) return res.json({ ok: true, message: "If an account matches, a reset code was emailed to the address on file." });
 
     const code = String(Math.floor(100000 + Math.random() * 900000));
     if (isOwner) await pool.query("UPDATE auth SET resetCode = ?, resetExpires = ? WHERE id = 1", [code, Date.now() + 30 * 60 * 1000]);
@@ -660,7 +791,7 @@ app.post("/api/forgot-password", async (req, res) => {
         '<p style="font-size:26px;font-weight:800;letter-spacing:3px;color:#ea580c">' + code + "</p>" +
         "<p>It expires in 30 minutes. If you didn't request this, you can ignore this email.</p></div>",
     });
-    res.json({ ok: true, message: "A reset code was emailed to the address on file." });
+    res.json({ ok: true, message: "If an account matches, a reset code was emailed to the address on file." });
   } catch (e) {
     res.json({ ok: false, error: "Could not send the email: " + e.message });
   }
@@ -720,7 +851,8 @@ app.post("/api/logout", (req, res) => {
 // Verify the token + phone number ID without sending a message.
 app.post("/api/test-whatsapp", requireAuth, async (req, res) => {
   try {
-    const { token, phoneId } = req.body || {};
+    const phoneId = (req.body || {}).phoneId;
+    const token = await fillWaToken((req.body || {}).token);
     if (!token || !phoneId) return res.json({ ok: false, error: "Enter the API token and phone number ID." });
     const r = await fetch("https://graph.facebook.com/v20.0/" + encodeURIComponent(phoneId) + "?fields=display_phone_number,verified_name", {
       headers: { Authorization: "Bearer " + token },
@@ -738,7 +870,8 @@ app.post("/api/test-whatsapp", requireAuth, async (req, res) => {
 // Send a WhatsApp text message via the Cloud API.
 app.post("/api/send-whatsapp", requireAuth, async (req, res) => {
   try {
-    const { token, phoneId, to, message } = req.body || {};
+    const { phoneId, to, message } = req.body || {};
+    const token = await fillWaToken((req.body || {}).token);
     if (!token || !phoneId) return res.json({ ok: false, error: "WhatsApp API is not configured." });
     const num = String(to || "").replace(/\D/g, "");
     if (!num) return res.json({ ok: false, error: "No destination phone number." });
