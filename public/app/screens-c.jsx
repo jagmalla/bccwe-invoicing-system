@@ -3,19 +3,83 @@
    ============================================================ */
 
 /* ---------------- Accounting ---------------- */
-function Accounting({ store }) {
+const ACCT_TYPES = ["Asset", "Liability", "Equity", "Revenue", "Expense"];
+const ACCT_PLURAL = { Asset: "Assets", Liability: "Liabilities", Equity: "Equity", Revenue: "Revenue", Expense: "Expenses" };
+// Accounts the app itself posts to — never deletable, so postings always land.
+const SYSTEM_ACCTS = ["1000", "1010", "1200", "1300", "2000", "2100", "2110", "2200", "3000", "3900", "4000", "4010", "4100", "4200", "4900", "5000", "5100", "5110", "6900"];
+
+function Accounting({ store, pushToast }) {
   const D = BCCWE;
   const sf = store || "all";
   const [tab, setTab] = useState("coa");
-  const groups = ["Asset", "Liability", "Equity", "Revenue", "Expense"];
+  const [modal, setModal] = useState(null); // {type:"acct",acct?} | {type:"mje"} | {type:"opening"}
+  const [, _r] = useState(0);
+  const bump = () => _r((x) => x + 1);
+  const isAdmin = !!(window.STORES && window.STORES.isAdmin());
   const toneFor = { Asset: "blue", Liability: "amber", Equity: "slate", Revenue: "green", Expense: "red" };
+
+  function saveAccount(data, original) {
+    if (original) {
+      const oldName = original.name;
+      original.name = data.name;
+      if (!SYSTEM_ACCTS.includes(String(original.code))) original.type = data.type;
+      window.logAudit("UPDATE", "Account", "accounts", original.code, "Renamed account " + original.code + " “" + oldName + "” → “" + data.name + "”");
+      pushToast && pushToast(original.code + " updated");
+    } else {
+      D.accounts.push({ code: data.code, name: data.name, type: data.type, balance: 0 });
+      D.accounts.sort((a, b) => String(a.code).localeCompare(String(b.code), "en", { numeric: true }));
+      window.logAudit("CREATE", "Account", "accounts", data.code, "Added account " + data.code + " " + data.name + " (" + data.type + ")");
+      pushToast && pushToast("Account " + data.code + " · " + data.name + " added");
+    }
+    if (window.persist) window.persist("accounts");
+    setModal(null); bump();
+  }
+  function deleteAccount(a) {
+    if (SYSTEM_ACCTS.includes(String(a.code))) { pushToast && pushToast("This is a system account the app posts to — it can't be deleted."); return; }
+    const live = liveAccountBalances(sf)[a.code] || 0;
+    if (Math.abs(live) > 0.005) { pushToast && pushToast("Can't delete " + a.code + " — its balance is " + fmt(live) + ". Move the balance with a journal entry first."); return; }
+    const usedTax = Object.values(D.TAX.modes || {}).some((m) => (m.comps || []).some((c) => c.acct === a.code));
+    const usedExp = (D.expenseCategories || []).some((c) => c.acct === a.code);
+    const usedJournal = (D.journal || []).some((j) => (j.lines || []).some((l) => l.acct === a.code));
+    if (usedTax || usedExp) { pushToast && pushToast("Can't delete " + a.code + " — it's mapped in " + (usedTax ? "tax settings" : "expense types") + "."); return; }
+    if (usedJournal) { pushToast && pushToast("Can't delete " + a.code + " — journal entries reference it."); return; }
+    if (!window.confirm("Delete account " + a.code + " " + a.name + "?")) return;
+    D.accounts = D.accounts.filter((x) => x !== a);
+    window.logAudit("DELETE", "Account", "accounts", a.code, "Deleted account " + a.code + " " + a.name);
+    if (window.persist) window.persist("accounts");
+    pushToast && pushToast("Deleted account " + a.code);
+    bump();
+  }
+  async function saveManualJE(je) {
+    D.journal.unshift(je);
+    window.logAudit("CREATE", "Journal entry", "journal", je.id, "Manual journal entry " + je.id + " · " + je.memo + " · " + fmt(je.lines.reduce((s, l) => s + l.dr, 0)));
+    const ok = window.persistNow ? await window.persistNow("journal") : true;
+    if (!ok) {
+      D.journal = D.journal.filter((j) => j !== je);
+      pushToast && pushToast("Couldn't save — no connection. Nothing was posted.");
+      bump(); return;
+    }
+    pushToast && pushToast(je.id + " posted — balances updated");
+    setModal(null); bump();
+  }
+  async function deleteManualJE(je) {
+    if (!window.confirm("Delete manual entry " + je.id + "? Its effect on the balances will be reversed.")) return;
+    const prev = D.journal;
+    D.journal = D.journal.filter((j) => j !== je);
+    window.logAudit("DELETE", "Journal entry", "journal", je.id, "Deleted manual journal entry " + je.id + " · " + je.memo);
+    const ok = window.persistNow ? await window.persistNow("journal") : true;
+    if (!ok) { D.journal = prev; pushToast && pushToast("Couldn't save — no connection. The entry is unchanged."); bump(); return; }
+    pushToast && pushToast(je.id + " deleted — balances updated");
+    bump();
+  }
 
   return (
     <div>
       <PageHead title="Accounting" sub="Double-entry ledger · chart of accounts · journal"
         actions={<>
-          <Btn variant="ghost" icon="plus">New account</Btn>
-          <Btn variant="primary" icon="book">Manual journal entry</Btn>
+          {isAdmin && <Btn variant="ghost" icon="ledger" onClick={() => setModal({ type: "opening" })}>Set opening balances</Btn>}
+          {isAdmin && <Btn variant="ghost" icon="plus" onClick={() => setModal({ type: "acct" })}>New account</Btn>}
+          {isAdmin && <Btn variant="primary" icon="book" onClick={() => setModal({ type: "mje" })}>Manual journal entry</Btn>}
         </>} />
 
       {sf !== "all" && (
@@ -25,6 +89,7 @@ function Accounting({ store }) {
       )}
       <div className="tabs">
         <button className={"tab" + (tab === "coa" ? " on" : "")} onClick={() => setTab("coa")}>Chart of accounts</button>
+        <button className={"tab" + (tab === "balance" ? " on" : "")} onClick={() => setTab("balance")}>Balance sheet</button>
         <button className={"tab" + (tab === "journal" ? " on" : "")} onClick={() => setTab("journal")}>General journal</button>
         <button className={"tab" + (tab === "ledger" ? " on" : "")} onClick={() => setTab("ledger")}>General ledger</button>
       </div>
@@ -33,17 +98,23 @@ function Accounting({ store }) {
         const live = liveAccountBalances(sf);
         return (
         <div className="coa-grid">
-          {groups.map((g) => {
+          {ACCT_TYPES.map((g) => {
             const accts = D.accounts.filter((a) => a.type === g);
             const sum = accts.reduce((s, a) => s + (live[a.code] || 0), 0);
             return (
-              <Card key={g} title={g + "s"} sub={accts.length + " accounts"} actions={<Badge tone={toneFor[g]}>{fmt(sum)}</Badge>}>
+              <Card key={g} title={ACCT_PLURAL[g]} sub={accts.length + " accounts"} actions={<Badge tone={toneFor[g]}>{fmt(sum)}</Badge>}>
                 <ul className="coa-list">
                   {accts.map((a) => (
                     <li key={a.code}>
                       <span className="jcode">{a.code}</span>
                       <span className="coa-name">{a.name}</span>
                       <span className="coa-bal mono">{fmt(live[a.code] || 0)}</span>
+                      {isAdmin && (
+                        <span className="coa-acts">
+                          <button className="icon-btn" title="Edit account" onClick={() => setModal({ type: "acct", acct: a })}><Icon name="edit" size={14} /></button>
+                          {!SYSTEM_ACCTS.includes(String(a.code)) && <button className="icon-btn" title="Delete account" onClick={() => deleteAccount(a)}><Icon name="trash" size={14} /></button>}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -54,6 +125,8 @@ function Accounting({ store }) {
         );
       })()}
 
+      {tab === "balance" && <BalanceSheet store={sf} />}
+
       {tab === "journal" && (
         <Card pad={false}>
           <div className="journal-list">
@@ -63,8 +136,11 @@ function Accounting({ store }) {
               return (
                 <div className="je" key={je.id}>
                   <div className="je-head">
-                    <div><span className="mono strong">{je.id}</span> <span className="muted">· {shortDate(je.date)}</span><div className="je-memo">{je.memo}</div></div>
-                    <Badge tone={Math.abs(dr - cr) < 0.01 ? "green" : "red"} dot>{Math.abs(dr - cr) < 0.01 ? "Balanced" : "Check"}</Badge>
+                    <div><span className="mono strong">{je.id}</span> <span className="muted">· {shortDate(je.date)}</span>{je.manual && <Badge tone="blue">Manual</Badge>}<div className="je-memo">{je.memo}</div></div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Badge tone={Math.abs(dr - cr) < 0.01 ? "green" : "red"} dot>{Math.abs(dr - cr) < 0.01 ? "Balanced" : "Check"}</Badge>
+                      {je.manual && isAdmin && <button className="icon-btn" title="Delete manual entry (reverses its effect)" onClick={() => deleteManualJE(je)}><Icon name="trash" size={14} /></button>}
+                    </div>
                   </div>
                   <table className="jtable wide">
                     <thead><tr><th>Account</th><th className="r">Debit</th><th className="r">Credit</th></tr></thead>
@@ -78,11 +154,16 @@ function Accounting({ store }) {
                 </div>
               );
             })}
+            {!D.journal.length && <Empty icon="book" text="No journal entries yet — register sales, POS sales and manual entries appear here" />}
           </div>
         </Card>
       )}
 
       {tab === "ledger" && <Ledger store={sf} />}
+
+      {modal && modal.type === "acct" && <AccountFormModal acct={modal.acct} onSave={saveAccount} onClose={() => setModal(null)} />}
+      {modal && modal.type === "mje" && <ManualJEModal onSave={saveManualJE} onClose={() => setModal(null)} />}
+      {modal && modal.type === "opening" && <OpeningBalancesModal store={sf} onSave={saveManualJE} onClose={() => setModal(null)} />}
     </div>
   );
 }
@@ -90,20 +171,20 @@ function Accounting({ store }) {
 function Ledger({ store }) {
   const D = BCCWE;
   const sf = store || "all";
-  const [acct, setAcct] = useState("1200");
+  const [acct, setAcct] = useState("1010");
   const live = liveAccountBalances(sf);
-  const a = Object.assign({}, D.accounts.find((x) => x.code === acct), { balance: live[acct] || 0 });
-  // synth a few running lines
-  const rows = useMemo(() => {
-    const seed = [
-      { date: "2026-06-02", memo: "Opening balance", dr: 0, cr: 0 },
-      { date: "2026-06-09", memo: "Payment received — INV-1044", dr: acct === "1010" ? 900 : 0, cr: acct === "1200" ? 900 : 0 },
-      { date: "2026-06-11", memo: "Invoice INV-1046", dr: acct === "1200" ? 226.81 : 0, cr: 0 },
-      { date: "2026-06-12", memo: "Invoice INV-1047", dr: acct === "1200" ? 1388.8 : 0, cr: 0 },
-    ];
-    let bal = a.balance - seed.reduce((s, r) => s + r.dr - r.cr, 0);
-    return seed.map((r) => { bal += r.dr - r.cr; return { ...r, bal }; });
-  }, [acct, sf]);
+  const bal = live[acct] || 0;
+  // REAL journal activity touching this account (register, POS, manual entries).
+  // The old version rendered four hard-coded fake rows and back-solved a fake
+  // running balance — pure fiction on real data.
+  const rows = [];
+  (D.journal || []).forEach((je) => {
+    (je.lines || []).forEach((l) => {
+      if (l.acct !== acct) return;
+      rows.push({ id: je.id, date: je.date, manual: !!je.manual, memo: je.memo, dr: l.dr || 0, cr: l.cr || 0 });
+    });
+  });
+  rows.sort((x, y) => String(y.date).localeCompare(String(x.date)) || String(y.id).localeCompare(String(x.id)));
 
   return (
     <Card pad={false}>
@@ -113,17 +194,193 @@ function Ledger({ store }) {
             {D.accounts.map((x) => <option key={x.code} value={x.code}>{x.code} · {x.name}</option>)}
           </select>
         </Field>
-        <div className="ledger-bal">Current balance <strong className="mono">{fmt(a.balance)}</strong></div>
+        <div className="ledger-bal">Current balance (derived) <strong className="mono">{fmt(bal)}</strong></div>
+      </div>
+      <div className="inline-note" style={{ margin: "0 16px" }}>
+        <Icon name="alert" size={15} /> Lines below are recorded journal entries (register sales, POS and manual entries).
+        Invoice, payment, expense and purchase activity posts straight into the derived balance shown above without journal lines.
       </div>
       <table className="data-table">
-        <thead><tr><th>Date</th><th>Memo</th><th className="r">Debit</th><th className="r">Credit</th><th className="r">Running balance</th></tr></thead>
+        <thead><tr><th>Date</th><th>Entry</th><th>Memo</th><th className="r">Debit</th><th className="r">Credit</th></tr></thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={i}><td className="muted">{shortDate(r.date)}</td><td>{r.memo}</td><td className="r mono">{r.dr ? fmtPlain(r.dr) : "—"}</td><td className="r mono">{r.cr ? fmtPlain(r.cr) : "—"}</td><td className="r mono strong">{fmt(r.bal)}</td></tr>
+            <tr key={i}>
+              <td className="muted">{shortDate(r.date)}</td>
+              <td className="mono">{r.id}{r.manual ? " · manual" : ""}</td>
+              <td>{r.memo}</td>
+              <td className="r mono">{r.dr ? fmtPlain(r.dr) : "—"}</td>
+              <td className="r mono">{r.cr ? fmtPlain(r.cr) : "—"}</td>
+            </tr>
           ))}
+          {!rows.length && <tr><td colSpan="5"><Empty icon="book" text="No journal lines recorded for this account yet" /></td></tr>}
         </tbody>
       </table>
     </Card>
+  );
+}
+
+/* ---- Account add/edit ---- */
+function AccountFormModal({ acct, onSave, onClose }) {
+  const D = BCCWE;
+  const editing = !!acct;
+  const sys = editing && SYSTEM_ACCTS.includes(String(acct.code));
+  const [code, setCode] = useState(editing ? String(acct.code) : "");
+  const [name, setName] = useState(editing ? acct.name : "");
+  const [type, setType] = useState(editing ? acct.type : "Expense");
+  const codeClash = !editing && D.accounts.some((a) => String(a.code) === code.trim());
+  const valid = name.trim() && (editing || (code.trim() && !codeClash));
+  return (
+    <Modal title={editing ? "Edit account — " + acct.code : "New account"} onClose={onClose}
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!valid} onClick={() => onSave({ code: code.trim(), name: name.trim(), type }, acct)}>{editing ? "Save changes" : "Add account"}</Btn>
+      </>}>
+      <div className="meta-grid">
+        <Field label="Account code" required hint={editing ? "Codes can't change — postings reference them" : "e.g. 1600, 6950 — pick the range that matches the type"}>
+          <input value={code} readOnly={editing} className={editing ? "ro" : ""} placeholder="e.g. 6950" onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, ""))} />
+        </Field>
+        <Field label="Type" hint={sys ? "System account — type is fixed" : "Where it sits on the statements"}>
+          {sys ? <input value={type} readOnly className="ro" />
+            : <select value={type} onChange={(e) => setType(e.target.value)}>{ACCT_TYPES.map((t) => <option key={t}>{t}</option>)}</select>}
+        </Field>
+      </div>
+      <Field label="Account name" required><input value={name} placeholder="e.g. Vehicle Expenses" onChange={(e) => setName(e.target.value)} /></Field>
+      {codeClash && <div className="inline-note"><Icon name="alert" size={15} /> Account code {code.trim()} already exists.</div>}
+    </Modal>
+  );
+}
+
+/* ---- Manual journal entry ---- */
+function ManualJEModal({ onSave, onClose }) {
+  const D = BCCWE;
+  const [date, setDate] = useState(D.today);
+  const [memo, setMemo] = useState("");
+  const [lines, setLines] = useState([
+    { id: 1, acct: "1010", dr: "", cr: "" },
+    { id: 2, acct: "3000", dr: "", cr: "" },
+  ]);
+  const uid = useRef(3);
+  const upd = (id, patch) => setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const add = () => setLines((ls) => [...ls, { id: uid.current++, acct: (D.accounts[0] || {}).code || "", dr: "", cr: "" }]);
+  const rm = (id) => setLines((ls) => (ls.length > 2 ? ls.filter((l) => l.id !== id) : ls));
+  const dr = lines.reduce((s, l) => s + (parseFloat(l.dr) || 0), 0);
+  const cr = lines.reduce((s, l) => s + (parseFloat(l.cr) || 0), 0);
+  const balanced = Math.abs(dr - cr) < 0.005 && dr > 0.005;
+  const valid = balanced && memo.trim() && date;
+  function submit() {
+    if (!valid) return;
+    const nm = (c) => { const a = D.accounts.find((x) => x.code === c); return a ? a.name : c; };
+    onSave({
+      id: "MJE-" + Date.now().toString(36).toUpperCase().slice(-6),
+      date, memo: memo.trim(), manual: true,
+      lines: lines.filter((l) => (parseFloat(l.dr) || 0) > 0 || (parseFloat(l.cr) || 0) > 0)
+        .map((l) => ({ acct: l.acct, name: nm(l.acct), dr: +(parseFloat(l.dr) || 0).toFixed(2), cr: +(parseFloat(l.cr) || 0).toFixed(2) })),
+    });
+  }
+  return (
+    <Modal title="Manual journal entry" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!valid} onClick={submit}>Post entry</Btn>
+      </>}>
+      <div className="meta-grid">
+        <Field label="Date" required><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Memo / reason" required><input value={memo} placeholder="e.g. Bank balance correction, equipment purchase…" onChange={(e) => setMemo(e.target.value)} /></Field>
+      </div>
+      <table className="data-table compact">
+        <thead><tr><th>Account</th><th className="r">Debit</th><th className="r">Credit</th><th /></tr></thead>
+        <tbody>
+          {lines.map((l) => (
+            <tr key={l.id}>
+              <td>
+                <select value={l.acct} onChange={(e) => upd(l.id, { acct: e.target.value })}>
+                  {D.accounts.map((x) => <option key={x.code} value={x.code}>{x.code} · {x.name}</option>)}
+                </select>
+              </td>
+              <td className="r"><input className="r purch-in" type="number" min="0" step="0.01" value={l.dr} placeholder="0.00" onChange={(e) => upd(l.id, { dr: e.target.value, cr: e.target.value ? "" : l.cr })} /></td>
+              <td className="r"><input className="r purch-in" type="number" min="0" step="0.01" value={l.cr} placeholder="0.00" onChange={(e) => upd(l.id, { cr: e.target.value, dr: e.target.value ? "" : l.dr })} /></td>
+              <td><button className="icon-btn" title="Remove line" onClick={() => rm(l.id)}><Icon name="x" size={14} /></button></td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot><tr><td>Totals</td><td className="r mono">{fmtPlain(dr)}</td><td className="r mono">{fmtPlain(cr)}</td><td /></tr></tfoot>
+      </table>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+        <Btn variant="ghost" size="sm" icon="plus" onClick={add}>Add line</Btn>
+        <Badge tone={balanced ? "green" : "red"} dot>{balanced ? "Balanced" : "Debits must equal credits"}</Badge>
+      </div>
+      <div className="inline-note" style={{ marginTop: 10 }}>
+        <Icon name="check" size={15} /> Manual entries adjust the Chart of accounts, Trial balance and Balance sheet.
+        The Income Statement stays transaction-based (invoices, sales, expenses).
+      </div>
+    </Modal>
+  );
+}
+
+/* ---- Guided opening-balance adjustment (one balanced manual entry) ---- */
+function OpeningBalancesModal({ store, onSave, onClose }) {
+  const D = BCCWE;
+  const live = liveAccountBalances(store || "all");
+  const rows0 = D.accounts.filter((a) => a.type === "Asset" || a.type === "Liability")
+    .map((a) => ({ code: a.code, name: a.name, type: a.type, current: +((live[a.code] || 0)).toFixed(2) }));
+  const [date, setDate] = useState(D.today);
+  const [vals, setVals] = useState(() => { const m = {}; rows0.forEach((r) => { m[r.code] = String(r.current); }); return m; });
+  const deltas = rows0
+    .map((r) => ({ ...r, target: parseFloat(vals[r.code]) || 0 }))
+    .map((r) => ({ ...r, delta: +(r.target - r.current).toFixed(2) }))
+    .filter((r) => Math.abs(r.delta) > 0.005);
+  // Build the balanced entry: each account moves to its target; the net
+  // difference offsets to 3000 Owner's Equity (the standard opening treatment).
+  let net = 0; // running debits − credits
+  const jl = [];
+  deltas.forEach((r) => {
+    if (r.type === "Asset") {
+      if (r.delta > 0) jl.push({ acct: r.code, dr: r.delta, cr: 0 }); else jl.push({ acct: r.code, dr: 0, cr: -r.delta });
+      net += r.delta;
+    } else {
+      if (r.delta > 0) jl.push({ acct: r.code, dr: 0, cr: r.delta }); else jl.push({ acct: r.code, dr: -r.delta, cr: 0 });
+      net -= r.delta;
+    }
+  });
+  if (Math.abs(net) > 0.005) jl.push(net > 0 ? { acct: "3000", dr: 0, cr: +net.toFixed(2) } : { acct: "3000", dr: +(-net).toFixed(2), cr: 0 });
+  const valid = deltas.length > 0;
+  function submit() {
+    if (!valid) return;
+    const nm = (c) => { const a = D.accounts.find((x) => x.code === c); return a ? a.name : c; };
+    onSave({
+      id: "MJE-" + Date.now().toString(36).toUpperCase().slice(-6),
+      date, memo: "Opening balance adjustment", manual: true,
+      lines: jl.map((l) => ({ acct: l.acct, name: nm(l.acct), dr: +(+l.dr).toFixed(2), cr: +(+l.cr).toFixed(2) })),
+    });
+  }
+  return (
+    <Modal title="Set opening balances" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!valid} onClick={submit}>Post adjustment{deltas.length ? " (" + deltas.length + " account" + (deltas.length === 1 ? "" : "s") + ")" : ""}</Btn>
+      </>}>
+      <p className="import-lead">Type each account's <strong>real balance as of the date below</strong>. One balanced journal entry is posted
+        moving every changed account to its target; the net difference goes to <strong>3000 Owner's Equity</strong>.
+        Perfect after importing history — e.g. set Bank to what's actually in the bank.</p>
+      <Field label="As of date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <table className="data-table compact" style={{ marginTop: 10 }}>
+        <thead><tr><th>Account</th><th className="r">Current (derived)</th><th className="r">Actual balance</th><th className="r">Adjustment</th></tr></thead>
+        <tbody>
+          {rows0.map((r) => {
+            const target = parseFloat(vals[r.code]) || 0;
+            const delta = +(target - r.current).toFixed(2);
+            return (
+              <tr key={r.code} style={Math.abs(delta) > 0.005 ? { background: "var(--accent-soft, #fff4ec)" } : null}>
+                <td><span className="jcode">{r.code}</span> {r.name}</td>
+                <td className="r mono muted">{fmt(r.current)}</td>
+                <td className="r"><input className="r purch-in" type="number" step="0.01" value={vals[r.code]} onChange={(e) => setVals((m) => ({ ...m, [r.code]: e.target.value }))} /></td>
+                <td className="r mono">{Math.abs(delta) > 0.005 ? fmt(delta) : "—"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </Modal>
   );
 }
 
@@ -382,6 +639,19 @@ function liveAccountBalances(filter) {
   // Inventory is held company-wide → only shown in the combined view.
   bal["1300"] = (filter === "all" || !filter)
     ? (D.inventory || []).reduce((x, it) => x + (it.stock || 0) * (it.cost || 0), 0) : 0;
+  // MANUAL journal entries (posted from Accounting) are the one kind of journal
+  // record the engine reads — opening balances and corrections. System-generated
+  // entries (register/POS) are display records whose effects are already derived
+  // from the transactions above; folding them in would double-count. Applied
+  // after the 1300 snapshot so a deliberate inventory-valuation adjustment sticks.
+  const _mTypeOf = {}; (D.accounts || []).forEach((a) => { _mTypeOf[a.code] = a.type; });
+  (D.journal || []).forEach((je) => {
+    if (!je || !je.manual) return;
+    (je.lines || []).forEach((l) => {
+      const debitNormal = _mTypeOf[l.acct] === "Asset" || _mTypeOf[l.acct] === "Expense";
+      add(l.acct, debitNormal ? (l.dr || 0) - (l.cr || 0) : (l.cr || 0) - (l.dr || 0));
+    });
+  });
   // Balance the books: plug the net into Retained Earnings.
   // NOTE: this stays a full plug until Phase 8 makes purchases/receiving post to
   // Inventory (1300). Today 1300 is overwritten with a stock snapshot (below) that
@@ -486,31 +756,40 @@ function PLReport({ store }) {
 }
 
 function BalanceSheet({ store }) {
+  const D = BCCWE;
   const sf = store || "all";
-  const b = storeBalances(sf);
-  const f = storeFinance(sf);
-  const assets = b.cash + b.ar + b.inventory;
-  const liabilities = b.taxPay + (b.deposits || 0) + (b.payables || 0);
-  const equity = assets - liabilities; // plug to retained earnings so the books balance
+  // Built from the FULL derived account balances (same numbers as the Chart of
+  // accounts and Trial balance), so every account — Equipment, A/P, manual
+  // entries, opening balances — appears. The old version showed only a fixed
+  // cash/AR/inventory trio and ignored manual entries entirely.
+  const live = liveAccountBalances(sf);
+  const rowsFor = (type) => (D.accounts || [])
+    .filter((a) => a.type === type)
+    .map((a) => ({ code: a.code, name: a.name, bal: live[a.code] || 0 }))
+    .filter((a) => Math.abs(a.bal) > 0.005);
+  const assets = rowsFor("Asset"), liabs = rowsFor("Liability"), equity = rowsFor("Equity");
+  const tA = assets.reduce((s, a) => s + a.bal, 0);
+  const tL = liabs.reduce((s, a) => s + a.bal, 0);
+  const tE = equity.reduce((s, a) => s + a.bal, 0);
   return (
     <div className="statement">
-      <h3 className="stmt-title">Balance Sheet — {storeLabel(sf)}</h3>
+      <h3 className="stmt-title">Balance Sheet — {storeLabel(sf)} · as of {shortDate(BCCWE.today)}</h3>
       <div className="stmt-sec">Assets</div>
-      <StatementRow label="Cash & bank (collected)" value={fmt(b.cash)} indent />
-      <StatementRow label="Accounts receivable" value={fmt(b.ar)} indent />
-      {b.inventory > 0.005 && <StatementRow label="Inventory (at cost)" value={fmt(b.inventory)} indent />}
-      <StatementRow label="Total assets" value={fmt(assets)} bold />
+      {assets.map((a) => <StatementRow key={a.code} label={a.code + " · " + a.name} value={fmt(a.bal)} indent neg={a.bal < 0} />)}
+      {!assets.length && <StatementRow label="No asset balances yet" value={fmt(0)} indent />}
+      <StatementRow label="Total assets" value={fmt(tA)} bold />
       <div className="stmt-sec">Liabilities</div>
-      <StatementRow label="GST / PST payable" value={fmt(b.taxPay)} indent />
-      {Math.abs(b.payables || 0) > 0.005 && <StatementRow label={(b.payables || 0) >= 0 ? "Accounts payable (suppliers)" : "Supplier prepayments (net)"} value={fmt(b.payables)} indent neg={(b.payables || 0) < 0} />}
-      {(b.deposits || 0) > 0.005 && <StatementRow label="Customer deposits" value={fmt(b.deposits)} indent />}
-      <StatementRow label="Total liabilities" value={fmt(liabilities)} bold />
+      {liabs.map((a) => <StatementRow key={a.code} label={a.code + " · " + a.name} value={fmt(a.bal)} indent neg={a.bal < 0} />)}
+      {!liabs.length && <StatementRow label="No liability balances" value={fmt(0)} indent />}
+      <StatementRow label="Total liabilities" value={fmt(tL)} bold />
       <div className="stmt-sec">Equity</div>
-      <StatementRow label="Owner's equity & retained earnings" value={fmt(equity)} indent />
-      <StatementRow label="Net income (this view)" value={fmt(f.netIncome)} indent />
-      <StatementRow label="Liabilities + Equity" value={fmt(liabilities + equity)} total />
-      <div className="stmt-check"><Icon name="check" size={15} /> Assets {fmt(assets)} = Liabilities + Equity {fmt(liabilities + equity)}</div>
-      {sf !== "all" && <div className="stmt-note">Inventory is tracked company-wide and appears only in the combined view.</div>}
+      {equity.map((a) => <StatementRow key={a.code} label={a.code + " · " + a.name + (a.code === "3900" ? " (incl. accumulated net income)" : "")} value={fmt(a.bal)} indent neg={a.bal < 0} />)}
+      {!equity.length && <StatementRow label="No equity balances" value={fmt(0)} indent />}
+      <StatementRow label="Total equity" value={fmt(tE)} bold />
+      <StatementRow label="Liabilities + Equity" value={fmt(tL + tE)} total />
+      <div className="stmt-check"><Icon name="check" size={15} /> Assets {fmt(tA)} = Liabilities + Equity {fmt(tL + tE)}</div>
+      <div className="stmt-note">Derived from every recorded transaction plus manual journal entries and opening-balance adjustments.
+        {sf !== "all" ? " Inventory is tracked company-wide and appears only in the combined view." : ""}</div>
     </div>
   );
 }

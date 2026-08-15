@@ -331,3 +331,42 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
 7. **Phases 9 → 10** — reporting polish and hygiene, once the underlying data is correct.
 
 Each phase ends with a commit, a cache-bump, and a browser smoke-test before the next begins.
+
+---
+
+## Accounting build-out (requested 2026-08-15, after the remediation)
+
+Review findings: account edit/new/delete missing; "New account" & "Manual journal entry" buttons dead;
+General ledger tab rendered FAKE hardcoded rows; no periods anywhere; Reports period chips decorative;
+Reports export buttons dead; Balance Sheet thin (3 lines) and blind to manual entries; journal untouched
+by the engine (no way to post opening balances); group-name typos ("Liabilitys").
+
+### Phase A — Account management  *(done)*
+- [x] Edit account (rename; type editable for custom accounts, fixed for system), New-account modal
+      (unique numeric code), delete with guards (system accounts / non-zero balance / referenced by tax
+      or expense mappings / journal history → blocked). Admin-only; audit-logged. Plurals fixed.
+
+### Phase B — Manual journal entries + opening balances  *(done)*
+- [x] Manual journal entry modal: date, memo, Dr/Cr lines with account picker, must balance to post;
+      entries flagged `manual:true`, deletable (reverses effect). persistNow + rollback.
+- [x] Engine reads MANUAL journal entries only (system-generated register/POS entries stay display-only —
+      their effects are already derived; folding them in would double-count). Applied after the inventory
+      snapshot so valuation adjustments stick. *(harness: bank trued 2,058,327.82 → 45,000; equipment
+      appears; TB still balances; system JEs ignored.)*
+- [x] "Set opening balances" guided flow: type each asset/liability account's REAL balance; one balanced
+      adjustment posts, offset to 3000 Owner's Equity — the migration-day tool.
+
+### Phase C — Real Balance Sheet + real Ledger  *(Balance Sheet done; ledger detail partial)*
+- [x] Balance Sheet rebuilt from the full derived account balances — every asset/liability/equity account
+      (Equipment, A/P, manual entries, opening balances), totals, equation check, "as of" date. Used by
+      Reports AND as a new "Balance sheet" tab inside Accounting.
+- [x] Fake ledger rows removed — the ledger now lists REAL recorded journal lines for the account
+      (register/POS/manual) with an honest note that invoice/expense activity posts straight to the
+      derived balance.
+- [ ] Full per-account transaction detail (synthesized lines for invoices/payments/expenses/purchases
+      with running balance) — remaining Phase C work.
+
+### Phase D — Periods & exports  *(pending)*
+- [ ] Wire Reports period chips (Month/Quarter/Year/Custom) into P&L, Tax report, Income-by-client.
+- [ ] Journal tab search + date filter + pagination.
+- [ ] Implement Reports "Excel/CSV" and "Export PDF" buttons.

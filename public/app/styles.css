@@ -1404,3 +1404,7 @@ tr.po-row-disc td { box-shadow: inset 3px 0 0 var(--red, #d64545); }
 /* ---- inline double-click editing (stock table, admin only) ---- */
 .editcell { cursor: text; border-bottom: 1px dashed transparent; transition: border-color .15s; }
 .editcell:hover { border-bottom-color: #c9812c; }
+
+/* ---- chart-of-accounts row actions (admin) ---- */
+.coa-acts { display: inline-flex; gap: 2px; margin-left: 6px; opacity: 0; transition: opacity .15s; }
+.coa-list li:hover .coa-acts { opacity: 1; }
