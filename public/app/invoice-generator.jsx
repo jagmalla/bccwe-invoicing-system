@@ -289,7 +289,9 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
     const addedSales = [];
     // Orders aren't sales until converted — don't record item sales for them
     // (they were polluting price history and per-item analytics).
-    if (clientId && docKind !== "order") lines.forEach((l) => { if (l.code && l.qty > 0) { const e = { date, code: l.code, clientId, qty: l.qty, price: l.price, disc: l.disc || 0, cost: l.cost || 0 }; D.itemSales.unshift(e); addedSales.push(e); } });
+    // `inv` ties each row to its invoice, so deleting that invoice can remove
+    // exactly its rows instead of matching on values.
+    if (clientId && docKind !== "order") lines.forEach((l) => { if (l.code && l.qty > 0) { const e = { date, inv: (edit ? edit.no : finalNo), code: l.code, clientId, qty: l.qty, price: l.price, disc: l.disc || 0, cost: l.cost || 0 }; D.itemSales.unshift(e); addedSales.push(e); } });
     const adj = [];
     if (docKind !== "order") lines.forEach((l) => { if (l.code && l.qty > 0) { const it = stockable(l.code); if (it) { it.stock -= l.qty; adj.push([it, l.qty]); } } });
     D.invoices.unshift(rec);

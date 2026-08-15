@@ -40,11 +40,15 @@ function Stores({ pushToast }) {
 
   const taxLabel = (k) => (D.TAX.modes[k] || {}).label || k;
   const invCount = (id) => (D.invoices || []).filter((i) => (i.companyId || window.STORES.defaultId()) === id).length;
+  const isAdmin = !!(window.STORES && window.STORES.isAdmin());
 
   return (
     <div>
       <PageHead title="Stores" sub="Each store invoices, taxes and reports separately. Add as many as you run."
-        actions={<Btn variant="primary" icon="plus" onClick={() => setModal({ type: "add" })}>Add store</Btn>} />
+        actions={<>
+          {isAdmin && (D.companies || []).length > 1 && <Btn variant="ghost" icon="truck" onClick={() => setModal({ type: "move" })}>Move records</Btn>}
+          <Btn variant="primary" icon="plus" onClick={() => setModal({ type: "add" })}>Add store</Btn>
+        </>} />
 
       <div className="store-grid">
         {(D.companies || []).map((s) => (
@@ -71,6 +75,7 @@ function Stores({ pushToast }) {
 
       {(modal && modal.type === "add") && <StoreFormModal onSave={(d) => saveStore(d, null)} onClose={() => setModal(null)} />}
       {(modal && modal.type === "edit") && <StoreFormModal store={modal.store} onSave={(d) => saveStore(d, modal.store)} onClose={() => setModal(null)} />}
+      {(modal && modal.type === "move") && <MoveRecordsModal pushToast={pushToast} onDone={() => { bump(); setModal(null); }} onClose={() => setModal(null)} />}
       {(modal && modal.type === "delete") && (
         <Modal title={"Delete store — " + modal.store.name} onClose={() => setModal(null)}
           footer={<>
@@ -81,6 +86,111 @@ function Stores({ pushToast }) {
         </Modal>
       )}
     </div>
+  );
+}
+
+/* ---------------- Move records between stores (admin) ----------------
+   Re-files existing documents under a different store — e.g. history that was
+   imported before the stores were set up and therefore sits under whichever
+   store is first (records with no store of their own fall back to it).
+   Returns and exchanges are not listed: they follow their original invoice
+   automatically, so moving the invoice moves them too. */
+function MoveRecordsModal({ pushToast, onDone, onClose }) {
+  const D = BCCWE;
+  const stores = (D.companies || []);
+  const defId = window.STORES ? window.STORES.defaultId() : "";
+  const [from, setFrom] = useState(defId || (stores[0] && stores[0].id) || "");
+  const [to, setTo] = useState((stores.find((s) => s.id !== (defId || (stores[0] && stores[0].id))) || {}).id || "");
+  const [kinds, setKinds] = useState({ invoices: true, cashSales: false, expenses: false, purchaseOrders: false });
+  const [busy, setBusy] = useState(false);
+  const nameOf = (id) => (stores.find((s) => s.id === id) || {}).name || "—";
+
+  // "Belongs to" includes records with no store set, which fall back to the
+  // default store — exactly how they are shown everywhere else in the app.
+  const owns = (r, id) => (window.STORES ? window.STORES.idOf(r) : r.companyId) === id;
+  const TYPES = [
+    { key: "invoices", label: "Invoices", list: () => D.invoices || [] },
+    { key: "cashSales", label: "Register / POS sales, returns & exchanges", list: () => D.cashSales || [] },
+    { key: "expenses", label: "Expenses", list: () => D.expenses || [] },
+    { key: "purchaseOrders", label: "Purchase orders", list: () => D.purchaseOrders || [] },
+  ];
+  const countOf = (t) => from ? t.list().filter((r) => owns(r, from)).length : 0;
+  const chosen = TYPES.filter((t) => kinds[t.key]);
+  const totalToMove = chosen.reduce((s, t) => s + countOf(t), 0);
+  const valid = from && to && from !== to && totalToMove > 0;
+
+  async function move() {
+    if (!valid || busy) return;
+    setBusy(true);
+    const snapKeys = chosen.map((t) => t.key);
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    const moved = {};
+    chosen.forEach((t) => {
+      let n = 0;
+      t.list().forEach((r) => { if (owns(r, from)) { r.companyId = to; n++; } });
+      moved[t.label] = n;
+    });
+    const summary = Object.entries(moved).filter(([, n]) => n > 0).map(([l, n]) => n + " " + l.toLowerCase()).join(", ");
+    window.logAudit("UPDATE", "Store", "companies", nameOf(to),
+      "Moved " + summary + " from " + nameOf(from) + " to " + nameOf(to));
+    const ok = window.persistNow ? await window.persistNow.apply(null, snapKeys) : true;
+    setBusy(false);
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was moved; please try again.");
+      return;
+    }
+    pushToast && pushToast("Moved " + summary + " to " + nameOf(to));
+    onDone && onDone();
+  }
+
+  return (
+    <Modal title="Move records to another store" onClose={onClose}
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!valid || busy} onClick={move}>
+          {busy ? "Moving…" : valid ? "Move " + totalToMove + " record" + (totalToMove === 1 ? "" : "s") : "Choose stores and records"}
+        </Btn>
+      </>}>
+      <p className="rail-note" style={{ marginBottom: 14 }}>
+        Re-files existing documents under a different store. Nothing else changes — document numbers,
+        dates, totals, payments and stock all stay exactly as they are. Returns and exchanges follow
+        their original invoice automatically.
+      </p>
+      <div className="meta-grid">
+        <Field label="Move records currently in">
+          <select value={from} onChange={(e) => setFrom(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}{s.id === defId ? " (includes records with no store set)" : ""}</option>)}
+          </select>
+        </Field>
+        <Field label="Into this store">
+          <select value={to} onChange={(e) => setTo(e.target.value)}>
+            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      {from === to && <div className="inline-note"><Icon name="alert" size={15} /> Pick two different stores.</div>}
+      <h5 className="iv-sec" style={{ marginTop: 16 }}>What to move</h5>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {TYPES.map((t) => {
+          const n = countOf(t);
+          return (
+            <label key={t.key} className="email-pick" style={{ opacity: n ? 1 : .55 }}>
+              <input type="checkbox" checked={!!kinds[t.key]} disabled={!n}
+                onChange={() => setKinds((k) => Object.assign({}, k, { [t.key]: !k[t.key] }))} />
+              <span>{t.label} — <strong>{n}</strong> in {nameOf(from)}</span>
+            </label>
+          );
+        })}
+      </div>
+      {totalToMove > 0 && from !== to && (
+        <div className="inline-note" style={{ background: "var(--accent-soft)", color: "var(--accent-ink)" }}>
+          <Icon name="alert" size={15} /> {totalToMove} record{totalToMove === 1 ? "" : "s"} will move from <strong>{nameOf(from)}</strong> to <strong>{nameOf(to)}</strong>.
+          Each store's reports, tax totals and Balance Sheet will change accordingly. This is recorded in the activity log.
+        </div>
+      )}
+    </Modal>
   );
 }
 

@@ -141,6 +141,7 @@ function InvoiceDetail({ no, go, pushToast }) {
   const [payOpen, setPayOpen] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
   const [returnOpen, setReturnOpen] = useState(false);
+  const [delOpen, setDelOpen] = useState(false);
   const [priceSuggest, setPriceSuggest] = useState(false);
   const inv = D.invoices.find((i) => i.no === no);
   if (!inv) return <div><PageHead title="Invoice not found" actions={<Btn variant="ghost" icon="chevron" onClick={() => go("history")}>Back</Btn>} /><Card><Empty text={"No invoice " + no} /></Card></div>;
@@ -283,6 +284,52 @@ function InvoiceDetail({ no, go, pushToast }) {
     pushToast && pushToast(inv.no + " converted to a sales invoice");
     force((x) => x + 1);
   }
+  // Permanently remove an invoice (admin only) — for test/mistaken documents.
+  // Reverses exactly what creating it did: stock goes back on the shelf, its
+  // item-sales history rows are removed, and its payment records go with it.
+  // Refused when returns/exchanges exist against it — those must be dealt with
+  // first, or the credit notes would be left pointing at nothing.
+  async function deleteInvoice() {
+    const cns = (D.creditNotes || []).filter((c) => c.origInv === inv.no);
+    if (cns.length) {
+      pushToast && pushToast("Can't delete — " + cns.length + " return/exchange (" + cns.map((c) => c.no).join(", ") + ") is recorded against this invoice");
+      setDelOpen(false);
+      return;
+    }
+    const snapKeys = ["invoices", "payments", "inventory", "itemSales"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    const lines = deriveLines(inv) || [];
+    // Orders never deducted stock, so only a real sale puts units back.
+    if (inv.kind !== "order") {
+      lines.forEach((l) => {
+        if (!l.code || !(l.qty > 0)) return;
+        const it = (D.inventory || []).find((x) => x.code === l.code);
+        if (it) it.stock = (it.stock || 0) + l.qty;
+        // Drop this line's item-sales row. New rows carry the invoice number;
+        // older ones are matched on their facts, one row per line.
+        const idx = (D.itemSales || []).findIndex((s) => (s.inv ? s.inv === inv.no
+          : (s.code === l.code && s.clientId === inv.clientId && s.qty === l.qty && Math.abs((s.price || 0) - (l.price || 0)) < 0.005)));
+        if (idx >= 0) D.itemSales.splice(idx, 1);
+      });
+    }
+    const payCount = (D.payments || []).filter((p) => p.inv === inv.no).length;
+    D.payments = (D.payments || []).filter((p) => p.inv !== inv.no);
+    D.invoices = (D.invoices || []).filter((i) => i.no !== inv.no);
+    window.logAudit("DELETE", "Invoice", "invoices", inv.no,
+      "Deleted invoice " + inv.no + " · " + fmt(inv.total || 0) + " · " + clientName(inv.clientId)
+      + (payCount ? " · " + payCount + " payment record(s) removed" : "")
+      + (inv.kind !== "order" ? " · stock restored" : ""));
+    const ok = window.persistNow ? await window.persistNow("invoices", "payments", "inventory", "itemSales") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was deleted; please try again.");
+      setDelOpen(false); force((x) => x + 1); return;
+    }
+    pushToast && pushToast("Invoice " + inv.no + " deleted" + (payCount ? " with its " + payCount + " payment record(s)" : ""));
+    go("history");
+  }
+
   function downloadInvoice() {
     const paper = document.querySelector(".inv-paper-card .inv-paper") || document.querySelector(".inv-paper");
     window.logDownload({ kind: "PDF", file: inv.no + ".pdf", docNo: inv.no, clientId: inv.clientId });
@@ -310,6 +357,7 @@ function InvoiceDetail({ no, go, pushToast }) {
           <Btn variant="ghost" icon="send" onClick={sendWa}>WhatsApp</Btn>
           <Btn variant="ghost" icon="download" onClick={downloadInvoice}>Download PDF</Btn>
           {inv.kind !== "order" && <Btn variant="ghost" icon="history" onClick={() => setReturnOpen(true)}>Return / Exchange</Btn>}
+          {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="trash" onClick={() => setDelOpen(true)}>Delete</Btn>}
           {inv.kind === "order"
             ? <Btn variant="primary" icon="check" onClick={convertOrder}>Convert to sales invoice</Btn>
             : (bal > 0.005 && <Btn variant="primary" icon="money" onClick={() => setPayOpen(true)}>Record payment</Btn>)}
@@ -482,6 +530,37 @@ function InvoiceDetail({ no, go, pushToast }) {
       {payOpen && <RecordPaymentModal inv={inv} bal={bal} onClose={() => setPayOpen(false)} onRecord={recordPayment} />}
       {emailOpen && <EmailModal client={client} invNo={inv.no} total={inv.total} onClose={() => setEmailOpen(false)} pushToast={pushToast} />}
       {returnOpen && <InvoiceReturnModal inv={inv} onClose={() => setReturnOpen(false)} onSubmit={recordReturn} />}
+      {delOpen && (() => {
+        const cns = (D.creditNotes || []).filter((c) => c.origInv === inv.no);
+        const pays = (D.payments || []).filter((p) => p.inv === inv.no);
+        const lines = deriveLines(inv) || [];
+        const units = lines.reduce((s, l) => s + (l.code && l.qty > 0 ? l.qty : 0), 0);
+        return (
+          <Modal title={"Delete invoice " + inv.no} onClose={() => setDelOpen(false)}
+            footer={<>
+              <Btn variant="ghost" onClick={() => setDelOpen(false)}>Cancel</Btn>
+              <Btn variant="danger" icon="trash" disabled={cns.length > 0} onClick={deleteInvoice}>Delete permanently</Btn>
+            </>}>
+            {cns.length > 0 ? (
+              <div className="inline-note" style={{ marginTop: 0 }}>
+                <Icon name="alert" size={15} /> This invoice has {cns.length} return/exchange against it ({cns.map((c) => c.no).join(", ")}).
+                Delete or resolve those first — otherwise they would be left pointing at an invoice that no longer exists.
+              </div>
+            ) : (
+              <>
+                <p style={{ marginBottom: 12 }}>This permanently removes <strong>{inv.no}</strong> ({clientName(inv.clientId)} · {fmt(inv.total || 0)}) and everything recorded with it. It cannot be undone.</p>
+                <ul className="rail-note" style={{ paddingLeft: 18, lineHeight: 1.9 }}>
+                  <li>The invoice disappears from Invoice History and all reports</li>
+                  {inv.kind !== "order" && units > 0 && <li><strong>{units} unit{units === 1 ? "" : "s"}</strong> go back into inventory</li>}
+                  {pays.length > 0 && <li><strong>{pays.length} payment record{pays.length === 1 ? "" : "s"}</strong> ({fmt(pays.reduce((s, p) => s + (p.amount || 0), 0))}) are removed</li>}
+                  <li>Revenue, COGS and A/R update automatically — the books are derived live</li>
+                </ul>
+                <div className="inline-note"><Icon name="alert" size={15} /> The invoice number is not reused. This is recorded in the activity log against your account.</div>
+              </>
+            )}
+          </Modal>
+        );
+      })()}
 
       {Array.isArray(inv.attachments) && inv.attachments.length > 0 && (
         <Card title="Attached files" sub={inv.attachments.length + " archived cop" + (inv.attachments.length === 1 ? "y" : "ies") + " of the source invoice"}>
