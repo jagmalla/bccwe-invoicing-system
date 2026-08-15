@@ -561,14 +561,46 @@ export and the bucket maths, with a total row. `_arOf()` on the Clients list add
       return, return+fee, defective, exchange, register sale, register return+defective,
       write-off+cash expense, and all of it together), plus the A/R-aging↔1200 tie.
 
+---
+
+## Audit round 2: purchasing, deposits, payments, per-store (2026-08-15)
+
+Same method — the real engine over built scenarios, P&L checked against the ledger.
+
+### Bug 6 — free "bonus" units understated what suppliers were owed  · HIGH  *(fixed)*
+A/P valued received goods at `landedUnit × received-qty`. Landed cost spreads the bill across
+paid **and** free units, so every order with bonus stock recorded less than the supplier's actual
+bill: 10 units at $10 with 2 free and $12 freight is **$112 owed** but only **$93.30** was recorded.
+Inventory was right, so the missing $18.70 leaked into Retained Earnings as profit never made.
+*Fix:* new shared `poBilledValue()` prices the bill directly — modern orders from each line's base
+cost plus its allocated charge share, older single-line records by prorating the stored supplier
+total against how much arrived. Used by the ledger, the balance figures, the general ledger lines
+and the A/P report, so all four stay in lockstep. *Proven: $112.00 on both modern and legacy shapes;
+no-bonus and partial-receipt cases unchanged.*
+
+### Gap — a mis-keyed payment could never be corrected  *(built)*
+Payments could only be added. A wrong amount was permanent: stuck in the bank balance, the invoice
+status and A/R, with no way back (the `edit_pay`/`del_pay` permissions existed but nothing used
+them). Added **Correct payment** on the invoice page (admin): edit amount/date/method/deposit
+account, or remove the payment entirely. `inv.paid` and the invoice status move with it, the modal
+previews the resulting paid/owing figures, and both paths roll back on a failed save and are
+audit-logged.
+
+### Verified CORRECT (no change needed)
+- **Order deposits (2200):** money taken on an order is held as a liability with no revenue and no
+  receivable; converting to a sale releases the liability, books the revenue and leaves the
+  remaining balance as A/R.
+- **Overpayments:** paying more than the invoice leaves a customer credit in 2200, not negative A/R.
+- **Partial receipts:** only what actually arrived is billed.
+- **Supplier payments:** clear the payable and leave the bank correctly.
+- **Per-store filtering:** a return is attributed to the store of the invoice it came from, and
+  per-store revenue adds up exactly to the combined view.
+
 ### NOT audited in this pass (do not assume clean)
 Named explicitly so the boundary is honest. Each deserves the same treatment:
-- **Purchase orders / receiving** — landed-cost allocation across lines, partial receipts, closing a
-  PO short, supplier prepayments. (Phase 8 built it; this pass only re-verified the A/P total.)
-- **Payments screen** — editing/deleting a payment after the fact, over-payment handling, which bank
-  account a correction lands in.
-- **Deposits on orders (2200)** — converting an order to a sale, and refunding a deposit.
-- **Multi-store correctness** — every scenario above was verified on the combined view; per-store
-  filtering of returns (`cnStoreId` walks back to the original invoice) is reasoned but not tested.
-- **Bank reconciliation** (just built) — only its key helpers are unit-tested, not a full cycle.
+- **Refunding an order deposit** — a customer cancelling a deposit-paid order has no flow (the
+  Return/Exchange button is hidden on order invoices), so it needs a manual journal entry today.
+- **Closing a purchase order short** — the freight already paid on units that never arrived isn't
+  expensed anywhere (carried over from Phase 8).
+- **Bank reconciliation** — only its key helpers are unit-tested, not a full cycle.
 - **Barcode / label printing, email/WhatsApp delivery, attachments** — untouched by this audit.

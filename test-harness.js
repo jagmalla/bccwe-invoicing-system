@@ -685,6 +685,123 @@ function testTaxSplit() {
   ok(Math.abs(sum - +(oldSum / 1.05).toFixed(2)) < 0.011, "awkward amounts with a discount still reconcile within a cent");
 }
 
+// ============================================================================
+// 9. Purchase orders, deposits, overpayments, per-store filtering
+// ============================================================================
+function testPurchasingAndStores() {
+  section("Purchasing / deposits / per-store");
+
+  const bsand = { self: {}, navigator: { userAgent: "node" }, document: {}, console };
+  bsand.window = bsand; vm.createContext(bsand);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "public/vendor/babel.min.js"), "utf8"), bsand, { filename: "babel.min.js" });
+  const js = bsand.Babel.transform(fs.readFileSync(path.join(ROOT, "public/app/screens-c.jsx"), "utf8"), { presets: ["react"], filename: "screens-c.jsx" }).code;
+  // the REAL poLines, so PO shapes are interpreted exactly as the app does
+  const bsrc = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+  const poLines = new Function("itemByCode", /function poLines\(po\)[\s\S]*?\n}/.exec(bsrc)[0] + "\nreturn poLines;")(() => null);
+
+  const ACCTS = [
+    { code: "1000", name: "Cash", type: "Asset" }, { code: "1010", name: "Bank", type: "Asset" },
+    { code: "1200", name: "AR", type: "Asset" }, { code: "1300", name: "Inventory", type: "Asset" },
+    { code: "2000", name: "AP", type: "Liability" }, { code: "2100", name: "GST", type: "Liability" },
+    { code: "2110", name: "PST", type: "Liability" }, { code: "2200", name: "Deposits", type: "Liability" },
+    { code: "3900", name: "RE", type: "Equity" }, { code: "4000", name: "Sales", type: "Revenue" },
+    { code: "5000", name: "COGS", type: "Expense" },
+  ];
+  const STORES = {
+    all: () => [{ id: "co_cash", name: "Cash", active: true }, { id: "co_inv", name: "Invoice", active: true }],
+    active() { return this.all(); }, defaultId() { return "co_cash"; },
+    idOf(r) { return (r && r.companyId) || this.defaultId(); },
+    matches(r, f) { return (!f || f === "all") ? true : this.idOf(r) === f; },
+    nameOf(id) { return id === "co_inv" ? "Invoice" : "Cash"; },
+  };
+  const run = (D) => {
+    const ctx = { console, BCCWE: D, deriveLines: (i) => i.lines || [], poLines,
+      inRange: (d, r) => d >= r.from && d <= r.to, React: { createElement: () => null, Fragment: {} },
+      useState: () => [null, () => {}], useEffect: () => {}, useMemo: (f) => f(), useRef: () => ({}) };
+    ctx.window = ctx; ctx.window.STORES = STORES; vm.createContext(ctx); vm.runInContext(js, ctx, { filename: "screens-c.js" });
+    return ctx;
+  };
+  const base = () => ({ today: "2026-08-15", accounts: JSON.parse(JSON.stringify(ACCTS)),
+    clients: [{ id: "c1", type: "Retail" }], payments: [], creditNotes: [], cashSales: [], expenses: [],
+    journal: [], defectiveProducts: [], expenseCategories: [], purchaseOrders: [], inventory: [],
+    TAX: { modes: { both: { gst: 0.05, pst: 0.07 }, none: { gst: 0, pst: 0 } } }, invoices: [] });
+
+  // REGRESSION: free "bonus" units must not shrink what the supplier is owed.
+  // 10 @ $10 with 2 free and $12 freight = $112 billed, even though the landed
+  // cost per unit is spread over 12 units.
+  let D = base();
+  const landed = +(((10 * 10) + 12) / 12).toFixed(2);
+  D.purchaseOrders = [{ po: "PO-1", ref: "PO-1", date: "2026-08-01", supplier: "s1", status: "Received",
+    payment: { mode: "unpaid", amount: 0, account: "1010" },
+    lines: [{ code: "A", qty: 10, bonusQty: 2, cost: 10, landedUnit: landed, charge: 12, qtyReceived: 10 }],
+    total: 112 }];
+  D.inventory = [{ code: "A", stock: 12, cost: landed }];
+  let ctx = run(D); let bal = ctx.liveAccountBalances("all");
+  ok(Math.abs((bal["2000"] || 0) - 112) < 0.02, "A/P is the supplier's bill $112.00 even with 2 free units (was $93.30)");
+  ok(Math.abs(ctx.supplierPayableRows("all").reduce((s, r) => s + r.bal, 0) - (bal["2000"] || 0)) < 0.02,
+    "supplier-payables report still ties to account 2000");
+
+  // Legacy single-line orders (no lines[]) must reach the same answer.
+  D = base();
+  D.purchaseOrders = [{ po: "PO-2", date: "2026-08-01", supplier: "s1", status: "Received",
+    code: "A", qty: 10, bonusQty: 2, landedUnit: landed, qtyReceived: 10, total: 112 }];
+  ok(Math.abs((run(D).liveAccountBalances("all")["2000"] || 0) - 112) < 0.02, "legacy PO with bonus units also bills $112.00");
+
+  // No bonus, and partial receipts, must be unaffected by the fix.
+  D = base();
+  D.purchaseOrders = [{ po: "PO-3", ref: "PO-3", date: "2026-08-01", supplier: "s1", status: "Received",
+    payment: { mode: "unpaid", amount: 0, account: "1010" },
+    lines: [{ code: "A", qty: 10, bonusQty: 0, cost: 10, landedUnit: 11.2, charge: 12, qtyReceived: 10 }], total: 112 }];
+  ok(Math.abs((run(D).liveAccountBalances("all")["2000"] || 0) - 112) < 0.02, "no bonus units: A/P unchanged at $112.00");
+  D = base();
+  D.purchaseOrders = [{ po: "PO-4", ref: "PO-4", date: "2026-08-01", supplier: "s1", status: "Received",
+    payment: { mode: "unpaid", amount: 0, account: "1010" },
+    lines: [{ code: "A", qty: 10, bonusQty: 0, cost: 10, landedUnit: 10, charge: 0, qtyReceived: 6 }], total: 100 }];
+  ok(Math.abs((run(D).liveAccountBalances("all")["2000"] || 0) - 60) < 0.02, "partial receipt bills only what arrived ($60.00)");
+  // Paying the supplier clears the payable and leaves the bank.
+  D = base();
+  D.purchaseOrders = [{ po: "PO-5", ref: "PO-5", date: "2026-08-01", supplier: "s1", status: "Received",
+    payment: { mode: "paid", amount: 112, account: "1010" },
+    lines: [{ code: "A", qty: 10, bonusQty: 2, cost: 10, landedUnit: landed, charge: 12, qtyReceived: 10 }], total: 112 }];
+  ctx = run(D); bal = ctx.liveAccountBalances("all");
+  ok(Math.abs(bal["2000"] || 0) < 0.02 && Math.abs((bal["1010"] || 0) + 112) < 0.02,
+    "paying the supplier in full clears A/P and takes $112.00 from the bank");
+
+  // Order deposits: money held as a liability, no revenue until it becomes a sale.
+  D = base();
+  D.invoices = [{ no: "ORD-1", kind: "order", clientId: "c1", date: "2026-08-01", subtotal: 1000, gst: 50, pst: 70, total: 1120, paid: 200, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 1000, cost: 400 }] }];
+  ctx = run(D); bal = ctx.liveAccountBalances("all");
+  ok(Math.abs((bal["2200"] || 0) - 200) < 0.02 && Math.abs(ctx.storeFinance("all", null).revenue) < 0.02,
+    "an order deposit is a liability, not revenue");
+  ok(Math.abs(bal["1200"] || 0) < 0.02, "an unconverted order creates no receivable");
+  // Once converted the liability releases and the sale is booked.
+  D.invoices[0].kind = "sale";
+  ctx = run(D); bal = ctx.liveAccountBalances("all");
+  ok(Math.abs(bal["2200"] || 0) < 0.02 && Math.abs(ctx.storeFinance("all", null).revenue - 1000) < 0.02,
+    "converting the order releases the deposit and books the revenue");
+  ok(Math.abs((bal["1200"] || 0) - 920) < 0.02, "the balance after the deposit stays receivable ($920.00)");
+
+  // Overpayment is held as customer credit, not negative A/R.
+  D = base();
+  D.invoices = [{ no: "I1", kind: "sale", clientId: "c1", date: "2026-08-01", subtotal: 100, gst: 5, pst: 7, total: 112, paid: 150, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 100, cost: 40 }] }];
+  bal = run(D).liveAccountBalances("all");
+  ok(Math.abs((bal["2200"] || 0) - 38) < 0.02 && Math.abs(bal["1200"] || 0) < 0.02,
+    "overpayment becomes a $38.00 customer credit, A/R stays at zero");
+
+  // Per-store: a return belongs to the store of the invoice it came from.
+  D = base();
+  D.invoices = [
+    { no: "I1", companyId: "co_cash", kind: "sale", clientId: "c1", date: "2026-08-01", subtotal: 100, gst: 5, pst: 7, total: 112, paid: 112, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 100, cost: 40 }] },
+    { no: "I2", companyId: "co_inv", kind: "sale", clientId: "c1", date: "2026-08-02", subtotal: 200, gst: 10, pst: 14, total: 224, paid: 224, payMethod: "Debit", lines: [{ code: "A", qty: 2, price: 100, cost: 40 }] },
+  ];
+  D.creditNotes = [{ no: "CN1", type: "Return", retDisp: "Inventory", origInv: "I1", date: "2026-08-10", subtotal: -100, gst: -5, pst: -7, total: -112, refund: 112, refundPaid: 112, refundAccount: "1010", items: [{ code: "A", qty: 1, price: 100, cost: 40 }] }];
+  ctx = run(D);
+  const cash = ctx.storeFinance("co_cash", null), other = ctx.storeFinance("co_inv", null), all = ctx.storeFinance("all", null);
+  ok(Math.abs(cash.revenue) < 0.02, "the return lands in its invoice's store (Cash nets to zero)");
+  ok(Math.abs(other.revenue - 200) < 0.02, "the other store is unaffected by that return");
+  ok(Math.abs((cash.revenue + other.revenue) - all.revenue) < 0.02, "per-store revenue adds up to the combined view");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -696,6 +813,7 @@ function testTaxSplit() {
     testAccountingEngine();
     testReturnsExchangesExpenses();
     testTaxSplit();
+    testPurchasingAndStores();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

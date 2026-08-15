@@ -142,6 +142,7 @@ function InvoiceDetail({ no, go, pushToast }) {
   const [emailOpen, setEmailOpen] = useState(false);
   const [returnOpen, setReturnOpen] = useState(false);
   const [delOpen, setDelOpen] = useState(false);
+  const [payEdit, setPayEdit] = useState(null); // payment record being corrected
   const [priceSuggest, setPriceSuggest] = useState(false);
   const inv = D.invoices.find((i) => i.no === no);
   if (!inv) return <div><PageHead title="Invoice not found" actions={<Btn variant="ghost" icon="chevron" onClick={() => go("history")}>Back</Btn>} /><Card><Empty text={"No invoice " + no} /></Card></div>;
@@ -171,6 +172,50 @@ function InvoiceDetail({ no, go, pushToast }) {
     setPayOpen(false);
     pushToast && pushToast("Payment of " + fmt(amount) + " recorded on " + inv.no);
     force((x) => x + 1);
+  }
+
+  // Correcting a payment recorded by mistake. Without this, a mis-keyed amount
+  // was permanent: it sat in the bank balance, the invoice status and A/R with
+  // no way back. Both paths keep inv.paid in step with the payment records.
+  const canFixPay = !!(window.STORES && window.STORES.isAdmin());
+  async function removePayment(p) {
+    const snapKeys = ["payments", "invoices"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    const idx = D.payments.indexOf(p);
+    if (idx < 0) return;
+    D.payments.splice(idx, 1);
+    inv.paid = +Math.max(0, (inv.paid || 0) - (p.amount || 0)).toFixed(2);
+    inv.status = invStatus(inv);
+    window.logAudit("DELETE", "Payment", "payments", inv.no,
+      "Removed payment " + fmt(p.amount || 0) + " (" + (p.method || "") + ") from " + inv.no + " · invoice now " + inv.status);
+    const ok = window.persistNow ? await window.persistNow("payments", "invoices") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+    } else {
+      pushToast && pushToast("Payment of " + fmt(p.amount || 0) + " removed — " + inv.no + " is now " + inv.status);
+    }
+    setPayEdit(null); force((x) => x + 1);
+  }
+  async function updatePayment(p, next) {
+    const snapKeys = ["payments", "invoices"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    const before = p.amount || 0;
+    p.amount = next.amount; p.date = next.date; p.method = next.method; p.acct = next.acct;
+    inv.paid = +Math.max(0, (inv.paid || 0) - before + next.amount).toFixed(2);
+    inv.status = invStatus(inv);
+    window.logAudit("UPDATE", "Payment", "payments", inv.no,
+      "Corrected payment on " + inv.no + " · " + fmt(before) + " → " + fmt(next.amount) + " (" + next.method + ") · invoice now " + inv.status);
+    const ok = window.persistNow ? await window.persistNow("payments", "invoices") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+    } else {
+      pushToast && pushToast("Payment corrected — " + fmt(before) + " → " + fmt(next.amount));
+    }
+    setPayEdit(null); force((x) => x + 1);
   }
 
   const myReturns = D.creditNotes.filter((c) => c.origInv === inv.no);
@@ -488,10 +533,15 @@ function InvoiceDetail({ no, go, pushToast }) {
             {pays.length ? (
               <ul className="pay-hist">
                 {pays.map((p) => (
-                  <li key={p.id}><div><strong>{fmt(p.amount)}</strong><span>{p.method}</span></div><span className="muted mono">{shortDate(p.date)}</span></li>
+                  <li key={p.id}>
+                    <div><strong>{fmt(p.amount)}</strong><span>{p.method}</span></div>
+                    <span className="muted mono">{shortDate(p.date)}</span>
+                    {canFixPay && p.id && <button className="icon-btn" title="Correct or remove this payment" onClick={() => setPayEdit(p)}><Icon name="edit" size={14} /></button>}
+                  </li>
                 ))}
               </ul>
             ) : <p className="rail-note">No payments recorded yet.</p>}
+            {canFixPay && pays.length > 0 && <p className="rail-note" style={{ marginTop: 8 }}>Recorded a payment by mistake? Click the pencil to correct or remove it.</p>}
           </div>
 
           {myReturns.length > 0 && (
@@ -530,6 +580,8 @@ function InvoiceDetail({ no, go, pushToast }) {
       {payOpen && <RecordPaymentModal inv={inv} bal={bal} onClose={() => setPayOpen(false)} onRecord={recordPayment} />}
       {emailOpen && <EmailModal client={client} invNo={inv.no} total={inv.total} onClose={() => setEmailOpen(false)} pushToast={pushToast} />}
       {returnOpen && <InvoiceReturnModal inv={inv} onClose={() => setReturnOpen(false)} onSubmit={recordReturn} />}
+      {payEdit && <PaymentFixModal pay={payEdit} inv={inv} onClose={() => setPayEdit(null)}
+        onSave={(next) => updatePayment(payEdit, next)} onRemove={() => removePayment(payEdit)} />}
       {delOpen && (() => {
         const cns = (D.creditNotes || []).filter((c) => c.origInv === inv.no);
         const pays = (D.payments || []).filter((p) => p.inv === inv.no);
@@ -791,6 +843,53 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
           <strong>{mode === "Return" ? "Refund to customer" : (refund ? "Refund to customer" : collect ? "Collect from customer" : "Even exchange")}</strong>
           <strong>{fmt(refund || collect)}</strong>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- Correct or remove a recorded payment (admin) ---------------- */
+function PaymentFixModal({ pay, inv, onClose, onSave, onRemove }) {
+  const [amount, setAmount] = useState(String(pay.amount || 0));
+  const [date, setDate] = useState(pay.date || BCCWE.today);
+  const [method, setMethod] = useState(pay.method || "Cash");
+  const [acct, setAcct] = useState(pay.acct === "1000" ? "1000" : "1010");
+  const [confirmDel, setConfirmDel] = useState(false);
+  const amt = Math.max(0, parseFloat(amount) || 0);
+  const before = pay.amount || 0;
+  // What the invoice will look like once this correction lands.
+  const newPaid = +Math.max(0, (inv.paid || 0) - before + amt).toFixed(2);
+  const eff = typeof invEffectiveTotal === "function" ? invEffectiveTotal(inv) : (inv.total || 0);
+  const newBal = +(eff - newPaid + (inv.refunded || 0)).toFixed(2);
+  const valid = amt > 0 && Math.abs(amt - before) > 0.005;
+
+  return (
+    <Modal title="Correct payment" onClose={onClose}
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        {confirmDel
+          ? <span className="del-confirm"><span>Remove this payment?</span><Btn variant="danger" icon="trash" onClick={onRemove}>Confirm remove</Btn><Btn variant="ghost" onClick={() => setConfirmDel(false)}>Keep</Btn></span>
+          : <Btn variant="ghost" icon="trash" onClick={() => setConfirmDel(true)}>Remove payment</Btn>}
+        <Btn variant="primary" icon="check" disabled={!valid} onClick={() => onSave({ amount: +amt.toFixed(2), date, method, acct })}>Save correction</Btn>
+      </>}>
+      <p className="rail-note" style={{ marginBottom: 14 }}>
+        Recorded {shortDate(pay.date)} · <strong>{fmt(before)}</strong> · {pay.method}.
+        Correcting or removing it updates the invoice balance, the bank/cash account and A/R together.
+      </p>
+      <div className="meta-grid">
+        <Field label="Amount"><input type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+        <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Method"><input value={method} onChange={(e) => setMethod(e.target.value)} placeholder="Cash / Debit / E-Transfer…" /></Field>
+        <Field label="Deposited to">
+          <select value={acct} onChange={(e) => setAcct(e.target.value)}>
+            <option value="1010">1010 · Bank</option>
+            <option value="1000">1000 · Cash on Hand</option>
+          </select>
+        </Field>
+      </div>
+      <div className="inline-note" style={{ background: "var(--accent-soft)", color: "var(--accent-ink)" }}>
+        <Icon name="alert" size={15} /> After this change {inv.no} shows <strong>{fmt(newPaid)}</strong> paid
+        {newBal > 0.005 ? <> and <strong>{fmt(newBal)}</strong> still owing</> : newBal < -0.005 ? <> and <strong>{fmt(-newBal)}</strong> overpaid</> : <> and nothing owing</>}.
       </div>
     </Modal>
   );

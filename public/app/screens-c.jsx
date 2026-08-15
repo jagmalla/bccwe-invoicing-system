@@ -737,10 +737,7 @@ function storeBalances(filter) {
     if (!storeMatch(po, filter)) return;
     if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
     const pay = (po.payment && +po.payment.amount) || 0;
-    let recvVal = 0;
-    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
-    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
-    payables += recvVal - pay;
+    payables += poBilledValue(po) - pay;
   });
   // No Math.max(0,…) clamp: after netting input tax credits a return-heavy or
   // high-purchase period can legitimately leave a net GST *receivable* (negative
@@ -784,6 +781,38 @@ function reconKeyedLines(lines) {
   });
 }
 
+// What the supplier is actually owed for the goods RECEIVED on an order.
+//
+// Free "bonus" units are not billed — their cost is absorbed into the landed
+// cost of the paid units, which makes `landedUnit` lower than the price per
+// billed unit. Valuing the payable at landedUnit × received-qty therefore
+// understated the bill by the whole bonus share (10 units at $10 with 2 free
+// and $12 freight = $112 owed, but only $93.30 recorded), and the difference
+// leaked into Retained Earnings as profit that was never made.
+//
+// Modern orders carry each line's base `cost` plus its allocated `charge`, so
+// the bill is priced directly. Older single-line records don't separate the two,
+// but do store the supplier total, so that is prorated by how much arrived.
+function poBilledValue(po) {
+  const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+  if (!pls || !pls.length) return 0;
+  const detailed = pls.some((l) => l && l.charge != null) || pls.length > 1;
+  if (detailed) {
+    return pls.reduce((s, l) => {
+      const qty = l.qty || 0, recv = l.qtyReceived || 0;
+      if (recv <= 0) return s;
+      const unit = l.cost != null ? l.cost : (l.landedUnit || 0);
+      const pct = qty > 0 ? Math.min(1, recv / qty) : 0;
+      return s + recv * unit + pct * (l.charge || 0);
+    }, 0);
+  }
+  const l = pls[0];
+  const qty = l.qty || 0, recv = l.qtyReceived || 0;
+  if (recv <= 0) return 0;
+  if (po.total != null && qty > 0) return (+po.total || 0) * Math.min(1, recv / qty);
+  return recv * (l.landedUnit != null ? l.landedUnit : (l.cost || 0));
+}
+
 // Per-purchase-order open supplier balances — the same math that puts 2000
 // Accounts Payable on the Balance Sheet, kept as rows so the A/P report and
 // the balance always agree. Negative balance = prepayment to the supplier.
@@ -794,9 +823,7 @@ function supplierPayableRows(filter) {
     if (!storeMatch(po, filter)) return;
     if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
     const pay = (po.payment && +po.payment.amount) || 0;
-    let recvVal = 0;
-    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
-    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
+    const recvVal = poBilledValue(po);
     const bal = +(recvVal - pay).toFixed(2);
     if (Math.abs(bal) < 0.005) return;
     out.push({ ref: po.ref || po.po, supplier: po.supplier || "", date: po.date || "", recvVal: +recvVal.toFixed(2), paid: +pay.toFixed(2), bal });
@@ -915,10 +942,7 @@ function liveAccountBalances(filter) {
     if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
     const pay = (po.payment && +po.payment.amount) || 0;
     if (pay > 0) add((po.payment && po.payment.account) === "1000" ? "1000" : "1010", -pay);
-    let recvVal = 0;
-    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
-    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
-    add("2000", recvVal - pay);
+    add("2000", poBilledValue(po) - pay);
   });
   // Inventory is held company-wide → only shown in the combined view.
   bal["1300"] = (filter === "all" || !filter)
@@ -1084,10 +1108,7 @@ function ledgerLines(filter) {
       push((po.payment && po.payment.account) === "1000" ? "1000" : "1010", po.date, "Supplier payment — " + ref, 0, pay, poRef);
       push("2000", po.date, "Supplier payment — " + ref, pay, 0, poRef);
     }
-    let recvVal = 0;
-    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
-    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
-    push("2000", po.date, "Goods received — " + ref, 0, recvVal, poRef);
+    push("2000", po.date, "Goods received — " + ref, 0, poBilledValue(po), poRef);
   });
   (D.journal || []).forEach((je) => {
     if (!je || !je.manual) return;
