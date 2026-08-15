@@ -241,6 +241,104 @@ function testInventoryExport() {
   ok(captured && captured.length > 0 && captured[0] === 0x50 && captured[1] === 0x4b, "xlsx: produced a ZIP-signature workbook");
 }
 
+// ============================================================================
+// 6. Accounting engine — Balance Sheet balances, ledger ties, month periods
+//    Runs the REAL screens-c.jsx (Babel-transformed) on a synthetic dataset.
+// ============================================================================
+function testAccountingEngine() {
+  section("Accounting engine (balance identity, ledger ties, month periods)");
+
+  // Synthetic books: an invoice (partly paid via a payment record), an expense
+  // with GST+PST, a cash register sale, a received+part-paid purchase order,
+  // a manual opening-balance journal entry, and live stock for the 1300 snapshot.
+  const BCCWE = {
+    today: "2026-08-15",
+    accounts: [
+      { code: "1000", name: "Cash", type: "Asset" }, { code: "1010", name: "Bank", type: "Asset" },
+      { code: "1200", name: "A/R", type: "Asset" }, { code: "1300", name: "Inventory", type: "Asset" },
+      { code: "2000", name: "A/P", type: "Liability" }, { code: "2100", name: "GST", type: "Liability" },
+      { code: "2110", name: "PST", type: "Liability" }, { code: "2200", name: "Deposits", type: "Liability" },
+      { code: "3000", name: "Owner", type: "Equity" }, { code: "3900", name: "Retained", type: "Equity" },
+      { code: "4000", name: "Sales", type: "Revenue" }, { code: "4010", name: "Wholesale", type: "Revenue" },
+      { code: "4100", name: "Service", type: "Revenue" }, { code: "4200", name: "Restock", type: "Revenue" },
+      { code: "5000", name: "COGS", type: "Expense" }, { code: "5100", name: "WriteOff", type: "Expense" },
+      { code: "6100", name: "Rent", type: "Expense" },
+    ],
+    clients: [{ id: "c1", type: "Retail" }],
+    invoices: [{ no: "INV-1", clientId: "c1", date: "2026-08-01", due: "2026-08-31", subtotal: 100, gst: 5, pst: 7, total: 112, paid: 60, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 100, cost: 40, disc: 0 }] }],
+    payments: [{ inv: "INV-1", amount: 60, date: "2026-08-02", acct: "1010" }],
+    creditNotes: [],
+    cashSales: [{ date: "2026-08-04", method: "Cash", subtotal: 50, gst: 2.5, pst: 3.5, total: 56, paid: 56, cogs: 20 }],
+    expenses: [{ date: "2026-08-03", category: "Rent", desc: "Aug rent", amount: 500, tax: "both", acct: "6100", paidFrom: "1010" }],
+    purchaseOrders: [{ po: "PO-1", date: "2026-08-05", payment: { amount: 30, account: "1010" }, qtyReceived: 2, landedUnit: 25 }],
+    journal: [{ manual: true, date: "2026-08-06", memo: "Opening bank", lines: [{ acct: "1010", dr: 1000, cr: 0 }, { acct: "3000", dr: 0, cr: 1000 }] }],
+    inventory: [{ code: "A", stock: 3, cost: 40 }],
+    TAX: { modes: { both: { gst: 0.05, pst: 0.07 }, gst: { gst: 0.05, pst: 0 }, none: { gst: 0, pst: 0 } } },
+    expenseCategories: [], orders: [],
+  };
+
+  // Load Babel and transform the real screens-c.jsx, then run it with stubs.
+  const bsand = { self: {}, navigator: { userAgent: "node" }, document: {}, console };
+  bsand.window = bsand;
+  vm.createContext(bsand);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "public/vendor/babel.min.js"), "utf8"), bsand, { filename: "babel.min.js" });
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-c.jsx"), "utf8");
+  const js = bsand.Babel.transform(src, { presets: ["react"], filename: "screens-c.jsx" }).code;
+
+  const ctx = {
+    console, BCCWE,
+    deriveLines: (inv) => inv.lines || [],
+    poLines: (po) => [{ qtyReceived: po.qtyReceived || 0, landedUnit: po.landedUnit }],
+    inRange: (d, r) => d >= r.from && d <= r.to,
+    React: { createElement: () => null, Fragment: {} },
+    useState: () => [null, () => {}], useEffect: () => {}, useMemo: (f) => f(), useRef: () => ({}),
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(js, ctx, { filename: "screens-c.js" });
+  ok(typeof ctx.liveAccountBalances === "function" && typeof ctx.balanceSheetData === "function" && typeof ctx.ledgerLines === "function",
+    "engine functions loaded from real screens-c.jsx");
+
+  const bal = ctx.liveAccountBalances("all");
+  const typeOf = {}; BCCWE.accounts.forEach((a) => { typeOf[a.code] = a.type; });
+  const sumType = (t) => BCCWE.accounts.filter((a) => a.type === t).reduce((s, a) => s + (bal[a.code] || 0), 0);
+  // The identity the Balance Sheet display relies on: assets = liabilities +
+  // equity + (revenue − expenses). Guaranteed by the 3900 plug.
+  const gap = sumType("Asset") - (sumType("Liability") + sumType("Equity") + (sumType("Revenue") - sumType("Expense")));
+  ok(Math.abs(gap) < 0.01, "identity: assets = liabs + equity + earnings (gap " + gap.toFixed(4) + ")");
+
+  // The actual display fix: balanceSheetData folds earnings into 3900 so the
+  // published statement balances.
+  const d = ctx.balanceSheetData("all");
+  ok(Math.abs(d.tA - (d.tL + d.tE)) < 0.02, "balance sheet: assets " + d.tA.toFixed(2) + " = L+E " + (d.tL + d.tE).toFixed(2));
+  ok(d.tA > 0, "balance sheet: non-trivial dataset (assets " + d.tA.toFixed(2) + ")");
+
+  // Ledger lines tie to derived balances for normal accounts (not 1300/3900).
+  const lines = ctx.ledgerLines("all");
+  ["1000", "1010", "1200", "2000", "2100", "2110", "4000", "5000", "6100"].forEach((code) => {
+    const dn = typeOf[code] === "Asset" || typeOf[code] === "Expense";
+    const net = (lines[code] || []).reduce((s, l) => s + (dn ? l.dr - l.cr : l.cr - l.dr), 0);
+    ok(Math.abs(net - (bal[code] || 0)) < 0.02, "ledger ties " + code + " (lines " + net.toFixed(2) + " vs derived " + (bal[code] || 0).toFixed(2) + ")");
+  });
+
+  // Drill-down source links: invoice postings and PO postings carry route refs.
+  ok((lines["4000"] || []).some((l) => l.ref === "invoiceview/INV-1"), "revenue line links to its invoice");
+  ok((lines["1010"] || []).some((l) => l.ref === "invoiceview/INV-1"), "payment line links to its invoice");
+  ok((lines["2000"] || []).some((l) => l.ref === "po/PO-1"), "payable line links to its purchase order");
+
+  // Month period ("m:YYYY-MM") — extract the real periodRange from ui.jsx.
+  const uiSrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
+  const pr = new Function("BCCWE", "monthLabel", "shortDate",
+    extractFn(uiSrc, "periodRange") + "\nreturn periodRange;")(
+    { today: "2026-08-15" }, (m) => m, (d) => d);
+  const feb = pr("m:2026-02");
+  ok(feb.from === "2026-02-01" && feb.to === "2026-02-28", "month period: Feb 2026 → " + feb.from + "…" + feb.to);
+  const leap = pr("m:2024-02");
+  ok(leap.to === "2024-02-29", "month period: leap Feb 2024 ends on the 29th");
+  const aug = pr("m:2026-08");
+  ok(aug.from === "2026-08-01" && aug.to === "2026-08-31", "month period: Aug 2026 full month");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -249,6 +347,7 @@ function testInventoryExport() {
     await testAuthz();
     testEditCell();
     testInventoryExport();
+    testAccountingEngine();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

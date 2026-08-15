@@ -395,3 +395,59 @@ by the engine (no way to post opening balances); group-name typos ("Liabilitys")
 - [x] Bonus: AgingReport correctness (was still using stored status + raw total−paid and included order
       invoices) → return-aware `invOpenBalance`, live `invStatus`, orders excluded — matching Unpaid.
 - [x] Income-by-client now pre-tax, order-excluding, period-aware — consistent with the P&L.
+
+---
+
+## Reports drill-down build (requested 2026-08-15)
+
+Request restated: every number on the P&L and Balance Sheet must be clickable —
+opening the dated transactions behind it, linked to the source documents; Income
+by Client gets a client search, clickable client names, a specific-month picker,
+and "Custom" renamed to "Date Search".
+
+### Phase R1 — Audit findings fixed first  *(done)*
+- [x] **Balance Sheet never balanced (real bug, visible in the user's screenshot).** The 3900 plug
+      balances the TRIAL BALANCE (which includes revenue/expense accounts), but the Balance Sheet
+      shows only Asset/Liability/Equity rows — so it was off by exactly net income ($2,214,725.78
+      on the live data). New shared `balanceSheetData()` folds current earnings (Σ revenue − Σ expenses)
+      into 3900 for BOTH the on-screen statement and the Excel export. *(harness-proven: assets = L+E
+      by construction on the real engine.)*
+- [x] **The green "Assets = Liabilities + Equity" banner never compared the numbers** — it always
+      showed a green check. Now honest: green when |A − (L+E)| < 2¢, red "OUT OF BALANCE by …" otherwise.
+- [x] Income by Client: `Math.max(...[])` → −Infinity broke bar widths when empty; rows keyed by
+      name (collision-prone) → keyed by client id; negative-revenue bars clamped.
+
+### Phase R2 — Drill-downs  *(done)*
+- [x] `ledgerLines()` lines now carry a source-document route (`ref`) — invoices/payments/deposits →
+      `invoiceview/NO`, purchase orders → `po/REF` — engine math untouched (harness ties still green).
+- [x] New `ReportDrill` view inside Reports: clicking any P&L or BS line swaps the pane for the dated
+      postings behind that number (Back button returns). Honors the current store filter; P&L drills
+      honor the period filter live; BS drills are as-of-today with running balance.
+- [x] P&L rows wired: Sales revenue → 4000/4010/4100 · Restocking → 4200 · Total revenue → all 4xxx ·
+      COGS → 5000 · Write-off → 5100 · Gross profit → combined · each expense category → its expense
+      RECORDS (date, pre-tax, PST-in-cost, GST credit, paid-from account) · Total expenses → all
+      expense records · Net income → every Revenue+Expense account.
+- [x] BS rows wired: every account → its full ledger activity with running balance; Total assets /
+      liabilities / equity → the group combined; 1300/3900 show the snapshot/plug explanation notes.
+- [x] Accounting → Balance sheet tab: clicking an account jumps to the General-ledger tab with that
+      account pre-selected.
+- [x] Aging report: invoice numbers → invoice detail, client names → client account.
+
+### Phase R3 — Income by Client & period UX  *(done)*
+- [x] Client search box; client names link to `client/<id>` (the client account page).
+- [x] Month dropdown in the shared period bar — current month + previous 12, newest first
+      (`periodRange` learned `m:YYYY-MM`; leap-February harness-tested). Benefits the P&L and
+      GST/PST reports too, since the bar is shared.
+- [x] "Custom" chip renamed to "Date Search".
+
+### Phase R4 — Verification  *(done)*
+- [x] Harness: new "Accounting engine" section Babel-loads the REAL `screens-c.jsx` and proves, on a
+      synthetic dataset: the balance identity (assets = liabs + equity + earnings), `balanceSheetData`
+      balances exactly, ledger lines tie to derived balances on 9 accounts, drill-down refs exist, and
+      `m:` month ranges are correct (incl. leap year). 75 checks green.
+
+### Known data notes (not code bugs — flagged for the owner)
+- COGS $65.33 vs $2.2M revenue: bulk-imported invoice history carries no line costs, so historical
+  COGS/profit is understated. Real COGS accrues on invoices created in the system with item costs.
+- Cash on Hand negative: more cash refunds/expenses were paid from 1000 than cash recorded in — drill
+  the account to find the entries, then post a manual JE / opening balance to correct the till float.

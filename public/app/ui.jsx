@@ -169,6 +169,14 @@ function periodRange(period, from, to) {
   }
   if (period === "year") return { from: y + "-01-01", to: today, label: y };
   if (period === "custom") return { from: from || "2000-01-01", to: to || today, label: shortDate(from) + " – " + shortDate(to) };
+  // "m:YYYY-MM" — one specific calendar month (from the Month dropdown).
+  if (period && period.slice(0, 2) === "m:") {
+    const mm = period.slice(2);
+    const d = new Date(mm + "-01T00:00:00");
+    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    const pad = (n) => String(n).padStart(2, "0");
+    return { from: mm + "-01", to: end.getFullYear() + "-" + pad(end.getMonth() + 1) + "-" + pad(end.getDate()), label: monthLabel(mm) };
+  }
   return { from: "2000-01-01", to: "2999-12-31", label: "All time" };
 }
 function monthLabel(m) {
@@ -214,15 +222,31 @@ function itemByCode(code) {
 }
 
 function PeriodFilter({ period, setPeriod, from, to, setFrom, setTo }) {
+  // Month dropdown: the current month plus the previous 12, newest first, so a
+  // specific month is one click instead of a custom date range.
+  const months = (() => {
+    const out = [];
+    const t = new Date(BCCWE.today + "T00:00:00");
+    for (let k = 0; k <= 12; k++) {
+      const d = new Date(t.getFullYear(), t.getMonth() - k, 1);
+      const key = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+      out.push({ value: "m:" + key, label: monthLabel(key) });
+    }
+    return out;
+  })();
   return (
     <div className="periodbar">
       <Icon name="history" size={15} />
       <span className="period-lbl">Period</span>
       <div className="seg-filters">
-        {[["month", "This month"], ["lastmonth", "Last month"], ["year", "This year"], ["all", "All time"], ["custom", "Custom"]].map(([id, l]) => (
+        {[["month", "This month"], ["lastmonth", "Last month"], ["year", "This year"], ["all", "All time"], ["custom", "Date Search"]].map(([id, l]) => (
           <button key={id} className={"chip" + (period === id ? " on" : "")} onClick={() => setPeriod(id)}>{l}</button>
         ))}
       </div>
+      <select className="period-month" value={period.slice(0, 2) === "m:" ? period : ""} onChange={(e) => { if (e.target.value) setPeriod(e.target.value); }}>
+        <option value="">Month…</option>
+        {months.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+      </select>
       {period === "custom" && (
         <div className="period-custom">
           <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />

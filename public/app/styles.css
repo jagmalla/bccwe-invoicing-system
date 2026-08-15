@@ -894,7 +894,19 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 .stmt-row.bold { font-weight: 700; border-bottom: 1.5px solid var(--line); }
 .stmt-row.total { font-weight: 800; font-size: 15px; border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink); margin-top: 6px; padding: 11px 0; }
 .stmt-check { display: flex; align-items: center; gap: 8px; margin-top: 18px; padding: 11px 14px; background: var(--green-soft); color: #0a7350; border-radius: 8px; font-size: 12.5px; font-weight: 600; }
+.stmt-check.bad { background: var(--red-soft); color: var(--red); }
 .stmt-note { font-size: 12px; color: var(--ink-3); margin-top: 14px; }
+/* clickable statement rows (P&L / Balance Sheet drill-down) */
+.stmt-row.click { cursor: pointer; transition: background .12s; }
+.stmt-row.click:hover { background: var(--accent-soft); }
+.stmt-row.click span:first-child { display: inline-flex; align-items: center; gap: 5px; }
+.stmt-row.click span:first-child svg { color: var(--ink-3); opacity: 0; transition: opacity .12s; }
+.stmt-row.click:hover span:first-child svg { opacity: 1; color: var(--accent); }
+.stmt-row.click:hover span:first-child { color: var(--accent-ink); }
+.drill-head { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.drill-head .stmt-title { margin-bottom: 2px; }
+.drill-head .btn svg { transform: rotate(180deg); }
+.period-month { width: auto; padding: 6px 9px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink-2); }
 .data-table.tb td { padding: 8px 14px; }
 .aging-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 22px; }
 .aging-cell { padding: 14px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 5px; }
