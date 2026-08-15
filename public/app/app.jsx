@@ -142,7 +142,15 @@ function App() {
   const [route, setRoute] = useState(() => location.hash.slice(1) || "dashboard");
   const [toast, setToast] = useState(null);
   const [navOpen, setNavOpen] = useState(false);
-  const [store, setStore] = useState(() => (window.STORES ? window.STORES.initialFilter() : "all"));
+  // The active store starts from the one chosen at login (remembered for this
+  // browser session); fall back to the user's default view.
+  const [store, setStore] = useState(() => {
+    try { const s = sessionStorage.getItem("bccwe_store"); if (s) return s; } catch (e) {}
+    return window.STORES ? window.STORES.initialFilter() : "all";
+  });
+  // Remember the store when switched mid-session too, so it survives a reload
+  // and stays in sync with the login choice.
+  const changeStore = (v) => { setStore(v); try { sessionStorage.setItem("bccwe_store", v); } catch (e) {} };
   const storeOpts = window.STORES ? window.STORES.allowed() : [];
   const canAll = window.STORES ? window.STORES.canSeeAll() : true;
   const showStoreSwitcher = storeOpts.length > 1 || (canAll && storeOpts.length >= 1);
@@ -211,7 +219,7 @@ function App() {
             {showStoreSwitcher && (
               <div className="store-switch" title="Filter everything by store">
                 <Icon name="store" size={15} />
-                <select value={store} onChange={(e) => setStore(e.target.value)}>
+                <select value={store} onChange={(e) => changeStore(e.target.value)}>
                   {canAll && <option value="all">All stores</option>}
                   {storeOpts.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
@@ -288,12 +296,79 @@ function LoadFailedScreen() {
   );
 }
 
+// After signing in, ask which store to work in. The chosen store becomes the
+// active filter, so new invoices/sales/returns are filed under it — and it can
+// still be switched anytime from the top bar. Only shown when there is a real
+// choice to make (two or more stores available).
+function StorePicker({ onPick }) {
+  const stores = window.STORES ? window.STORES.allowed() : [];
+  const canAll = window.STORES ? window.STORES.canSeeAll() : false;
+  const who = (window.__session && (window.__session.name || window.__session.userId)) || "";
+  const taxLabel = (t) => t === "both" ? "GST 5% + PST 7%" : t === "gst" ? "GST 5%" : t === "pst" ? "PST 7%" : "Tax-free";
+  const card = { width: 460, maxWidth: "94vw", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 16, boxShadow: "var(--sh-lg)", padding: "26px 26px 22px" };
+  const opt = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%", padding: "13px 15px", background: "var(--surface)", border: "1.5px solid var(--line)", borderRadius: 12, cursor: "pointer", transition: "border-color .14s, background .14s", textAlign: "left" };
+  const dot = { width: 38, height: 38, borderRadius: 10, display: "grid", placeItems: "center", background: "var(--accent-soft)", color: "var(--accent)", flexShrink: 0 };
+  const hoverIn = (e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.background = "var(--accent-soft)"; };
+  const hoverOut = (e) => { e.currentTarget.style.borderColor = "var(--line)"; e.currentTarget.style.background = "var(--surface)"; };
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--canvas)", padding: 24 }}>
+      <div style={card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 11, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center" }}><Icon name="store" size={21} /></div>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 19, color: "var(--ink)" }}>Choose a store</h2>
+            <p style={{ margin: 0, fontSize: 13, color: "var(--ink-2)" }}>{who ? "Welcome, " + who : "Which store are you working in?"}</p>
+          </div>
+        </div>
+        <p style={{ margin: "12px 0 16px", fontSize: 12.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
+          New invoices, sales and returns will be filed under the store you pick. You can switch stores anytime from the top bar.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {stores.map((s) => (
+            <button key={s.id} style={opt} onMouseEnter={hoverIn} onMouseLeave={hoverOut} onClick={() => onPick(s.id)}>
+              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={dot}><Icon name="store" size={19} /></span>
+                <span>
+                  <strong style={{ display: "block", fontSize: 15, color: "var(--ink)" }}>{s.name}</strong>
+                  <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{taxLabel(s.taxDefault)} · invoices {(s.invPrefix || "INV")}-…</span>
+                </span>
+              </span>
+              <Icon name="chevron" size={18} />
+            </button>
+          ))}
+          {canAll && stores.length > 1 && (
+            <button style={Object.assign({}, opt, { borderStyle: "dashed" })} onMouseEnter={hoverIn} onMouseLeave={hoverOut} onClick={() => onPick("all")}>
+              <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={Object.assign({}, dot, { background: "var(--slate-soft)", color: "var(--slate)" })}><Icon name="box" size={19} /></span>
+                <span>
+                  <strong style={{ display: "block", fontSize: 15, color: "var(--ink)" }}>All stores</strong>
+                  <span style={{ fontSize: 12, color: "var(--ink-3)" }}>Combined view · new invoices default to {stores[0] ? stores[0].name : "the first store"}</span>
+                </span>
+              </span>
+              <Icon name="chevron" size={18} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Gate the whole app behind login. data.js has already validated any saved
 // token and set window.__authed / window.__session during boot.
 function Root() {
+  const [storePicked, setStorePicked] = useState(() => {
+    try { return sessionStorage.getItem("bccwe_store") || ""; } catch (e) { return ""; }
+  });
   if (!window.__authed) return <LoginScreen />;
   if (window.__session && window.__session.mustChange) return <ForceChange />;
   if (window.__loadFailed) return <LoadFailedScreen />;
+  // Ask which store to work in, but only when there's a genuine choice (2+ stores)
+  // and one hasn't been picked yet this session.
+  const opts = window.STORES ? window.STORES.allowed() : [];
+  if (!storePicked && opts.length >= 2) {
+    return <StorePicker onPick={(id) => { try { sessionStorage.setItem("bccwe_store", id); } catch (e) {} setStorePicked(id); }} />;
+  }
   return <App />;
 }
 
