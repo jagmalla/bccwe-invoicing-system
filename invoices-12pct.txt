@@ -1,0 +1,63 @@
+# Invoices charged 12% (GST 5% + PST 7%) in the old system
+#
+# Paste the numbers below into: Invoice History -> Fix imported tax
+#   Tax:            GST 5% + PST 7%
+#   Which invoices: Only these invoice numbers
+#
+# Every other imported invoice is 5% GST and is handled by a second run with
+# "All untaxed invoices". Run THIS list first: once an invoice records its tax
+# it is skipped, which is what stops it being split twice.
+#
+# Leading zeros are not required - 4 matches 00004.
+# Kept as the record of which invoices were restated at 12%.
+1712
+1659
+1650
+1531
+1470
+1413
+1411
+1369
+1339
+1296
+1262
+1220
+1153
+1126
+1115
+1096
+1065
+960
+949
+890
+872
+800
+714
+678
+650
+649
+623
+613
+602
+587
+570
+547
+542
+540
+527
+519
+515
+514
+492
+491
+480
+429
+404
+391
+370
+359
+354
+339
+105
+4
+7
