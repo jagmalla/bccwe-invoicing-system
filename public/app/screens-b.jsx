@@ -137,10 +137,11 @@ function ClientCatalog() {
   );
 }
 
-function Inventory({ go, pushToast }) {
+function Inventory({ go, pushToast, initTab }) {
   if (window.isClientUser && window.isClientUser()) return <ClientCatalog />;
   const D = BCCWE;
-  const [tab, setTab] = useState("stock");
+  // initTab lets the Purchase Orders menu item open this screen on that tab.
+  const [tab, setTab] = useState(initTab || "stock");
   const [poView, setPoView] = useState("orders"); // orders | items
   const [poExpand, setPoExpand] = useState({});
   const [q, setQ] = useState("");
@@ -480,6 +481,21 @@ function Inventory({ go, pushToast }) {
 
   return (
     <div>
+      {/* Opened from the Purchase Orders menu item, this screen leads with the
+          orders rather than the stock list. Same page, purchase-focused framing. */}
+      {initTab === "orders" ? (() => {
+        const pend = (D.purchaseOrders || []).filter((p) => p.status !== "Received").length;
+        const owing = (typeof supplierPayableRows === "function")
+          ? supplierPayableRows("all").reduce((s, r) => s + r.bal, 0) : 0;
+        return (
+          <PageHead title="Purchase Orders"
+            sub={(D.purchaseOrders || []).length + " orders · " + pend + " awaiting delivery" + (Math.abs(owing) > 0.005 ? " · " + fmt(owing) + " owed to suppliers" : "")}
+            actions={<>
+              <Btn variant="ghost" icon="box" onClick={() => go("inventory")}>Inventory</Btn>
+              <Btn variant="primary" icon="truck" onClick={() => go("purchase")}>New purchase</Btn>
+            </>} />
+        );
+      })() : (
       <PageHead title="Inventory" sub={D.inventory.length + " items · " + fmt(stockValue) + " at cost · " + lowCount + " low"}
         actions={<>
           <Btn variant="ghost" icon="receipt" onClick={() => setModal({ type: "barcodes" })}>Print barcodes</Btn>
@@ -488,6 +504,7 @@ function Inventory({ go, pushToast }) {
           <Btn variant="ghost" icon="truck" onClick={() => go("purchase")}>New purchase</Btn>
           <Btn variant="primary" icon="plus" onClick={() => setModal({ type: "add" })}>Add item</Btn>
         </>} />
+      )}
 
       <div className="kpi-row tri">
         <MiniStat label="Inventory at cost" value={fmt(stockValue)} ico="box" />

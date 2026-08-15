@@ -12,6 +12,7 @@ const NAV = [
   { id: "orders", label: "Client Orders", icon: "order" },
   { id: "people", label: "Clients & Suppliers", icon: "people" },
   { id: "inventory", label: "Inventory", icon: "box" },
+  { id: "purchaseorders", label: "Purchase Orders", icon: "truck" },
   { id: "sales", label: "Sales", icon: "cart" },
   { id: "expenses", label: "Expenses", icon: "receipt" },
   { id: "accounting", label: "Accounting", icon: "ledger" },
@@ -23,8 +24,8 @@ const NAV = [
   { id: "settings", label: "Settings", icon: "settings" },
 ];
 const GROUPS = [
-  { title: "Operate", ids: ["dashboard", "pos", "history", "orders", "people"] },
-  { title: "Sales", ids: ["invoice", "return", "exchange"] },
+  { title: "Operate", ids: ["dashboard", "purchaseorders", "orders", "people"] },
+  { title: "Sales", ids: ["pos", "invoice", "history", "return", "exchange"] },
   { title: "Trade", ids: ["inventory", "expenses"] },
   { title: "Finance", ids: ["accounting", "unpaid", "reports"] },
   { title: "Admin", ids: ["mail", "logs", "stores", "settings"] },
@@ -42,6 +43,8 @@ function navAllowed(id) {
   if (id === "stores" || id === "mail" || id === "logs") return false; // admin-only utilities
   if (id === "pos") return !!(perms.sales && perms.sales.add);          // POS = can add a sale
   if (id === "neworder") return !!(perms.orders && perms.orders.add);   // New Order = can add an order
+  // Purchase orders live on the Inventory screen, so they follow its permission.
+  if (id === "purchaseorders") return !!(perms.inventory && (perms.inventory.orders || perms.inventory.view));
   if (id === "return" || id === "exchange") return !!(perms.sales && (perms.sales.add || perms.sales.ret_all || perms.sales.ret_own));
   const mp = perms[id];
   if (!mp) return true; // module not in the permission model — allow
@@ -164,7 +167,10 @@ function App() {
 
   const [base, ...restSeg] = route.split("/");
   const param = restSeg.join("/"); // ids may contain "/" — keep every segment
-  const navActive = base === "invoiceview" ? "history" : base === "client" ? "people" : (base === "purchase" || base === "po" || base === "receive") ? "inventory" : base;
+  // Purchase-order detail routes highlight Purchase Orders, since that is now
+  // where they are reached from.
+  const navActive = base === "invoiceview" ? "history" : base === "client" ? "people"
+    : (base === "purchase" || base === "po" || base === "receive") ? "purchaseorders" : base;
   const active = NAV.find((n) => n.id === navActive) || NAV[0];
   const crumbLabel = base === "invoiceview" ? "Invoice " + param
     : base === "client" ? ((BCCWE.clients.find((c) => c.id === param) || {}).name || "Client")
@@ -251,6 +257,8 @@ function App() {
           {base === "client" && <ClientAccount id={param} go={go} pushToast={pushToast} />}
           {base === "people" && <People go={go} pushToast={pushToast} />}
           {base === "inventory" && <Inventory go={go} pushToast={pushToast} />}
+          {/* Same screen, opened straight on its Purchase orders tab. */}
+          {base === "purchaseorders" && <Inventory key="po" go={go} pushToast={pushToast} initTab="orders" />}
           {base === "purchase" && <PurchasePage go={go} pushToast={pushToast} store={store} />}
           {base === "po" && <OrderDetailPage po={param} go={go} pushToast={pushToast} />}
           {base === "receive" && <ReceiveOrderPage po={param} go={go} pushToast={pushToast} />}
