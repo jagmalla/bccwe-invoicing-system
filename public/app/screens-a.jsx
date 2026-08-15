@@ -362,20 +362,28 @@ function parseInvNoList(text) {
   return String(text || "").split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
 }
 
-function taxSplitPlan(sf, modeKey, range, nos) {
+function taxSplitPlan(sf, modeKey, range, nos, allowTaxed) {
   const D = BCCWE;
   const m = (D.TAX && D.TAX.modes && D.TAX.modes[modeKey]) || null;
   const rate = m ? ((+m.gst || 0) + (+m.pst || 0)) : 0;
   const r2 = (n) => Math.round((+n || 0) * 100) / 100;
-  const targets = [], unmatched = [], ambiguous = [], alreadyTaxed = [];
-  if (!m || rate <= 0) return { rate: 0, targets, m, unmatched, ambiguous, alreadyTaxed };
-  const eligible = (rec) => Math.abs(rec.gst || 0) < 0.005 && Math.abs(rec.pst || 0) < 0.005 && Math.abs(rec.total || 0) > 0.005;
+  const targets = [], unmatched = [], ambiguous = [], alreadyTaxed = [], alreadyCorrect = [];
+  if (!m || rate <= 0) return { rate: 0, targets, m, unmatched, ambiguous, alreadyTaxed, alreadyCorrect };
+  // Normally only invoices with NO tax are touched. `allowTaxed` re-splits ones
+  // that DO record tax — for history split at the wrong rate (5% when it should
+  // have been 12%). The total is still the anchor, so re-splitting is safe:
+  // it just divides the same money differently.
+  const eligible = (rec) => Math.abs(rec.total || 0) > 0.005
+    && (allowTaxed || (Math.abs(rec.gst || 0) < 0.005 && Math.abs(rec.pst || 0) < 0.005));
   const split = (total) => {
     const sub = r2(total / (1 + rate));
     const tax = r2(total - sub);                 // exact: sub + tax === total
     const gst = rate > 0 ? r2(tax * ((+m.gst || 0) / rate)) : 0;
     return { sub, gst, pst: r2(tax - gst) };     // gst + pst === tax exactly
   };
+  // Already at the requested split → nothing to do (keeps re-runs harmless).
+  const unchanged = (rec, a) => Math.abs((rec.subtotal || 0) - a.sub) < 0.005
+    && Math.abs((rec.gst || 0) - a.gst) < 0.005 && Math.abs((rec.pst || 0) - a.pst) < 0.005;
   const wanted = Array.isArray(nos) && nos.length ? nos : null;
   if (wanted) {
     // Targeting an explicit list: resolve each entry to exactly one invoice.
@@ -389,14 +397,18 @@ function taxSplitPlan(sf, modeKey, range, nos) {
       const i = hits[0];
       if (!eligible(i)) { alreadyTaxed.push(i.no); return; }
       if (targets.some((t) => t.rec === i)) return;   // same invoice listed twice
-      targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, total: i.total || 0 }, after: split(i.total || 0) });
+      const a = split(i.total || 0);
+      if (unchanged(i, a)) { alreadyCorrect.push(i.no); return; }
+      targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, gst: i.gst || 0, pst: i.pst || 0, total: i.total || 0 }, after: a });
     });
   } else {
     (D.invoices || []).forEach((i) => {
       if (i.kind === "order") return;            // deposits carry no tax of their own
       if (!storeMatch(i, sf) || !eligible(i)) return;
       if (range && !inRange(i.date || "", range)) return;
-      targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, total: i.total || 0 }, after: split(i.total || 0) });
+      const a = split(i.total || 0);
+      if (unchanged(i, a)) return;
+      targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, gst: i.gst || 0, pst: i.pst || 0, total: i.total || 0 }, after: a });
     });
   }
   // Returns/exchanges must follow their invoice, or the netting would be wrong.
@@ -404,9 +416,11 @@ function taxSplitPlan(sf, modeKey, range, nos) {
   targets.forEach((t) => { changedNos[t.rec.no] = true; });
   (D.creditNotes || []).forEach((cn) => {
     if (!changedNos[cn.origInv] || !eligible(cn)) return;
-    targets.push({ kind: "credit", rec: cn, before: { sub: cn.subtotal || 0, total: cn.total || 0 }, after: split(cn.total || 0) });
+    const a = split(cn.total || 0);
+    if (unchanged(cn, a)) return;
+    targets.push({ kind: "credit", rec: cn, before: { sub: cn.subtotal || 0, gst: cn.gst || 0, pst: cn.pst || 0, total: cn.total || 0 }, after: a });
   });
-  return { rate, targets, m, unmatched, ambiguous, alreadyTaxed };
+  return { rate, targets, m, unmatched, ambiguous, alreadyTaxed, alreadyCorrect };
 }
 
 // Rescale line prices so they still add up to the new (pre-tax) subtotal, then
@@ -440,17 +454,24 @@ function TaxSplitModal({ store, pushToast, onClose }) {
   const [from, setFrom] = useState("2000-01-01");
   const [to, setTo] = useState(D.today);
   const [nosText, setNosText] = useState("");
+  const [redo, setRedo] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(null);
 
   const range = scope === "range" ? { from: from || "2000-01-01", to: to || D.today } : null;
   const wantedNos = scope === "list" ? parseInvNoList(nosText) : null;
-  const plan = taxSplitPlan(sf, modeKey, range, wantedNos);
+  // Re-splitting invoices that already record tax is only offered for an
+  // explicit list, so a wrong rate can never be applied to the whole book.
+  const allowTaxed = scope === "list" && redo;
+  const plan = taxSplitPlan(sf, modeKey, range, wantedNos, allowTaxed);
   const invs = plan.targets.filter((t) => t.kind === "invoice");
   const cns = plan.targets.filter((t) => t.kind === "credit");
   const totalMoney = invs.reduce((s, t) => s + t.before.total, 0);
   const newRevenue = invs.reduce((s, t) => s + t.after.sub, 0);
   const taxOut = invs.reduce((s, t) => s + t.after.gst + t.after.pst, 0);
+  // When re-splitting, what matters is the CHANGE against the tax already there.
+  const taxBefore = invs.reduce((s, t) => s + (t.before.gst || 0) + (t.before.pst || 0), 0);
+  const taxDelta = taxOut - taxBefore;
   const modeLabel = (k) => ((D.TAX.modes[k] || {}).label) || k;
   const sample = invs.slice(0, 3);
 
@@ -474,13 +495,22 @@ function TaxSplitModal({ store, pushToast, onClose }) {
         const factor = a.sub / oldSub;
         lineCount += taxSplitLines(lines, oldSub, a.sub);
         // Item-sales history was written from these same lines — scale it too so
-        // per-item analytics and price suggestions are pre-tax as well.
-        if (t.kind === "invoice") lines.forEach((l) => {
-          if (!l.code) return;
-          const row = (D.itemSales || []).find((s) => (s.inv ? s.inv === rec.no
-            : (s.code === l.code && s.clientId === rec.clientId && s.date === rec.date && s.qty === l.qty && !s.taxSplit)));
-          if (row) { row.price = r2(row.price * factor); row.taxSplit = true; salesCount++; }
-        });
+        // per-item analytics and price suggestions are pre-tax as well. Each line
+        // consumes a DIFFERENT row (an invoice can repeat the same item), and a
+        // row already scaled by an earlier run is still fair game: re-splitting
+        // at a corrected rate must move it again.
+        if (t.kind === "invoice") {
+          const used = {};
+          lines.forEach((l) => {
+            if (!l.code) return;
+            const idx = (D.itemSales || []).findIndex((s, si) => {
+              if (used[si]) return false;
+              if (s.inv) return s.inv === rec.no && s.code === l.code && s.qty === l.qty;
+              return s.code === l.code && s.clientId === rec.clientId && s.date === rec.date && s.qty === l.qty;
+            });
+            if (idx >= 0) { const row = D.itemSales[idx]; used[idx] = true; row.price = r2(row.price * factor); salesCount++; }
+          });
+        }
       }
     });
     window.logAudit("UPDATE", "Invoice", "invoices", invs.length + " invoices",
@@ -494,7 +524,7 @@ function TaxSplitModal({ store, pushToast, onClose }) {
       pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
       return;
     }
-    setDone({ n: invs.length, c: cns.length, tax: taxOut, lines: lineCount, sales: salesCount });
+    setDone({ n: invs.length, c: cns.length, tax: taxOut, delta: taxDelta, lines: lineCount, sales: salesCount });
     pushToast && pushToast(invs.length + " invoice(s) restated — " + fmt(taxOut) + " of tax carved out, totals unchanged");
   }
 
@@ -507,7 +537,7 @@ function TaxSplitModal({ store, pushToast, onClose }) {
           <li><strong>{fmt(done.tax)}</strong> of {modeLabel(modeKey)} is now recorded and will appear on the GST/PST report</li>
           <li>Every invoice total is unchanged — payments, balances and A/R are exactly as they were</li>
           <li>{done.lines} line price{done.lines === 1 ? "" : "s"} and {done.sales} item-history row{done.sales === 1 ? "" : "s"} rescaled to pre-tax</li>
-          <li>Revenue on the P&amp;L drops by the tax amount — that money is now a tax liability, not income</li>
+          <li>Revenue on the P&amp;L {done.delta >= 0 ? "drops" : "rises"} by <strong>{fmt(Math.abs(done.delta))}</strong> — the money moves {done.delta >= 0 ? "from income to tax owed" : "back from tax to income"}</li>
         </ul>
       </Modal>
     );
@@ -554,13 +584,24 @@ function TaxSplitModal({ store, pushToast, onClose }) {
             placeholder={"1712\n1659\n1650\n…"} style={{ fontFamily: "var(--mono)", fontSize: 12.5 }} />
         </Field>
       )}
-      {scope === "list" && (plan.unmatched.length > 0 || plan.ambiguous.length > 0 || plan.alreadyTaxed.length > 0) && (
+      {scope === "list" && (
+        <label className="email-pick" style={{ marginTop: 12 }}>
+          <input type="checkbox" checked={redo} onChange={() => setRedo((v) => !v)} />
+          <span>
+            <strong>Re-split invoices that already record tax</strong> — for history split at the wrong rate
+            (e.g. 5% GST when it should have been 5% GST + 7% PST). The total still doesn't change; the same
+            money is simply divided at the new rate.
+          </span>
+        </label>
+      )}
+      {scope === "list" && (plan.unmatched.length > 0 || plan.ambiguous.length > 0 || plan.alreadyTaxed.length > 0 || plan.alreadyCorrect.length > 0) && (
         <div className="inline-note">
           <Icon name="alert" size={15} />
           <span>
             {plan.unmatched.length > 0 && <>Not found ({plan.unmatched.length}): <strong className="mono">{plan.unmatched.slice(0, 12).join(", ")}{plan.unmatched.length > 12 ? "…" : ""}</strong>. </>}
             {plan.ambiguous.length > 0 && <>Matches more than one invoice ({plan.ambiguous.length}): <strong className="mono">{plan.ambiguous.slice(0, 6).map((a) => a.raw + " → " + a.matches.join("/")).join("; ")}</strong> — type the full number for these. </>}
-            {plan.alreadyTaxed.length > 0 && <>Already records tax, so skipped ({plan.alreadyTaxed.length}): <strong className="mono">{plan.alreadyTaxed.slice(0, 12).join(", ")}{plan.alreadyTaxed.length > 12 ? "…" : ""}</strong>.</>}
+            {plan.alreadyTaxed.length > 0 && <>Already records tax, so skipped ({plan.alreadyTaxed.length}): <strong className="mono">{plan.alreadyTaxed.slice(0, 12).join(", ")}{plan.alreadyTaxed.length > 12 ? "…" : ""}</strong> — tick the box above to re-split these at {modeLabel(modeKey)}. </>}
+            {plan.alreadyCorrect.length > 0 && <>Already at {modeLabel(modeKey)}, nothing to change ({plan.alreadyCorrect.length}): <strong className="mono">{plan.alreadyCorrect.slice(0, 12).join(", ")}{plan.alreadyCorrect.length > 12 ? "…" : ""}</strong>.</>}
           </span>
         </div>
       )}
@@ -574,18 +615,22 @@ function TaxSplitModal({ store, pushToast, onClose }) {
         <>
           <div className="kpi-row tri" style={{ marginBottom: 14 }}>
             <MiniStat label="Invoices to restate" value={invs.length} ico="invoice" />
-            <MiniStat label="Tax carved out" value={fmt(taxOut)} ico="receipt" />
+            <MiniStat label={taxBefore > 0.005 ? "Tax after (was " + fmt(taxBefore) + ")" : "Tax carved out"} value={fmt(taxOut)} ico="receipt" />
             <MiniStat label="Money collected (unchanged)" value={fmt(totalMoney)} ico="money" tone="green" />
           </div>
           <table className="data-table">
-            <thead><tr><th>Invoice</th><th className="r">Total (stays)</th><th className="r">Subtotal becomes</th><th className="r">{modeLabel(modeKey)}</th></tr></thead>
+            <thead><tr><th>Invoice</th><th className="r">Total (stays)</th><th className="r">Subtotal becomes</th><th className="r">Tax becomes</th></tr></thead>
             <tbody>
               {sample.map((t) => (
                 <tr key={t.rec.no}>
                   <td className="mono">{t.rec.no}</td>
                   <td className="r mono strong">{fmt(t.before.total)}</td>
                   <td className="r mono">{fmt(t.before.sub)} → {fmt(t.after.sub)}</td>
-                  <td className="r mono">{fmt(t.after.gst + t.after.pst)}</td>
+                  <td className="r mono">
+                    {((t.before.gst || 0) + (t.before.pst || 0)) > 0.005 && <span className="muted">{fmt((t.before.gst || 0) + (t.before.pst || 0))} → </span>}
+                    {fmt(t.after.gst + t.after.pst)}
+                    {t.after.pst > 0.005 && <em className="cat-tag">{fmt(t.after.gst)} GST + {fmt(t.after.pst)} PST</em>}
+                  </td>
                 </tr>
               ))}
               {invs.length > sample.length && <tr><td colSpan="4" className="muted">…and {invs.length - sample.length} more</td></tr>}
@@ -600,8 +645,8 @@ function TaxSplitModal({ store, pushToast, onClose }) {
             <div className="inline-note"><Icon name="alert" size={15} /> {cns.length} return/exchange against these invoices will be restated the same way, so the netting stays correct.</div>
           )}
           <div className="inline-note" style={{ background: "var(--accent-soft)", color: "var(--accent-ink)" }}>
-            <Icon name="alert" size={15} /> Revenue on the P&amp;L will drop by {fmt(taxOut)} — that money becomes tax you owe rather than income.
-            Invoices that already record tax are skipped, so running this twice changes nothing.
+            <Icon name="alert" size={15} /> Revenue on the P&amp;L {taxDelta >= 0 ? "drops" : "rises"} by {fmt(Math.abs(taxDelta))} — that money moves {taxDelta >= 0 ? "from income to tax you owe" : "back from tax to income"}.
+            Every total stays the same, and re-running with the same setting changes nothing.
           </div>
         </>
       )}

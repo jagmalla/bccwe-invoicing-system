@@ -637,6 +637,37 @@ function testTaxSplit() {
   lp = ctx.taxSplitPlan("all", "both", null, ctx.parseInvNoList("50"));
   ok(lp.targets.length === 0 && lp.alreadyTaxed.length === 1, "a listed invoice that already has tax is skipped and reported");
 
+  // --- Re-splitting invoices already split at the WRONG rate (5% → 12%) ---
+  const at5 = (no, total) => {
+    const sub = Math.round((total / 1.05) * 100) / 100;
+    return inv(no, total, { subtotal: sub, gst: Math.round((total - sub) * 100) / 100, pst: 0, tax: "gst",
+      lines: [{ code: "A", qty: 1, price: sub, disc: 0 }] });
+  };
+  ctx = run(mk([at5("01712", 112), at5("01659", 224)]));
+  const nums = ctx.parseInvNoList("1712 1659");
+  let noRedo = ctx.taxSplitPlan("all", "both", null, nums, false);
+  ok(noRedo.targets.length === 0 && noRedo.alreadyTaxed.length === 2, "without the re-split option, already-taxed invoices are still skipped");
+  let redo = ctx.taxSplitPlan("all", "both", null, nums, true);
+  ok(redo.targets.length === 2, "with the re-split option, they are picked up");
+  const rt = redo.targets[0];
+  ok(Math.abs(rt.after.sub - 100) < 0.005 && Math.abs(rt.after.gst - 5) < 0.005 && Math.abs(rt.after.pst - 7) < 0.005,
+    "$112 split at 5% re-splits to $100.00 + $5.00 GST + $7.00 PST");
+  ok(redo.targets.every((t) => Math.abs((t.after.sub + t.after.gst + t.after.pst) - t.before.total) < 0.005),
+    "re-split: totals still unchanged");
+  ok(redo.targets.every((t) => (t.before.gst || 0) > 0), "re-split preview carries the previous tax for comparison");
+  // Applying then re-running must be a no-op (guards against double application).
+  const D3 = mk([at5("01712", 112)]);
+  const c3 = run(D3);
+  const a3 = c3.taxSplitPlan("all", "both", null, ctx.parseInvNoList("1712"), true).targets[0].after;
+  Object.assign(D3.invoices[0], { subtotal: a3.sub, gst: a3.gst, pst: a3.pst, tax: "both" });
+  const rerun = c3.taxSplitPlan("all", "both", null, ctx.parseInvNoList("1712"), true);
+  ok(rerun.targets.length === 0 && rerun.alreadyCorrect.length === 1, "re-running after a re-split changes nothing");
+  // An untaxed invoice in the same list is handled normally alongside re-splits.
+  ctx = run(mk([at5("01712", 112), inv("01800", 112)]));
+  redo = ctx.taxSplitPlan("all", "both", null, ctx.parseInvNoList("1712 1800"), true);
+  ok(redo.targets.length === 2 && redo.targets.every((t) => Math.abs(t.after.sub - 100) < 0.005),
+    "a mixed list (one already split, one untaxed) both land at $100.00 + 12%");
+
   // Line rescaling: prices become pre-tax and still add up to the new subtotal.
   ctx = run(mk([]));
   let lines = [{ code: "A", qty: 1, price: 525, disc: 0 }];
