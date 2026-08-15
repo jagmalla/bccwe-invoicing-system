@@ -1400,3 +1400,7 @@ tr.po-row-disc td { box-shadow: inset 3px 0 0 var(--red, #d64545); }
 .po-discrep-banner > div { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .po-discrep-banner strong { font-size: 13.5px; }
 .po-discrep-banner span { font-size: 12px; color: #a4564c; }
+
+/* ---- inline double-click editing (stock table, admin only) ---- */
+.editcell { cursor: text; border-bottom: 1px dashed transparent; transition: border-color .15s; }
+.editcell:hover { border-bottom-color: #c9812c; }

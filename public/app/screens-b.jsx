@@ -57,6 +57,41 @@ function itemAvgCost(item) {
   return { avg, last, layers, totalValue: +totalCost.toFixed(2) };
 }
 
+// Double-click-to-edit money cell (admin only) for quick bulk price/cost work
+// on the stock list — no modal round-trip. Enter or clicking away saves; Esc
+// cancels. Non-admins just see the plain value.
+function EditCell({ canEdit, value, display, title, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState("");
+  const ref = useRef(null);
+  useEffect(() => { if (editing && ref.current) { ref.current.focus(); ref.current.select(); } }, [editing]);
+  if (!canEdit) return <>{display}</>;
+  if (!editing) {
+    return (
+      <span className="editcell" title={title || "Double-click to edit"}
+        onDoubleClick={() => { setVal(String(value != null ? value : 0)); setEditing(true); }}>
+        {display}
+      </span>
+    );
+  }
+  const commit = () => {
+    if (!editing) return;
+    setEditing(false);
+    const n = parseFloat(val);
+    if (isNaN(n) || n < 0) return;           // invalid input → keep the old value
+    const r = Math.round(n * 100) / 100;
+    if (Math.abs(r - (value || 0)) < 0.005) return; // unchanged
+    onSave(r);
+  };
+  return (
+    <input ref={ref} type="number" min="0" step="0.01" value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") commit(); else if (e.key === "Escape") setEditing(false); }}
+      style={{ width: 80, textAlign: "right", padding: "4px 6px", border: "1.5px solid #ea580c", borderRadius: 6, font: "inherit", background: "#fff" }} />
+  );
+}
+
 // Restricted product list for client logins: name + their reference price only.
 // No cost, supplier, stock, margin or other sensitive data.
 function ClientCatalog() {
@@ -158,6 +193,18 @@ function Inventory({ go, pushToast }) {
   const lowCount = D.inventory.filter((i) => i.kind !== "Service" && (i.alert || 0) > 0 && i.stock <= i.alert).length;
 
   // ---- CRUD handlers ----
+  // Quick double-click editing of cost/price straight in the table — admin only.
+  const _canInlineEdit = !!(window.STORES && window.STORES.isAdmin());
+  function inlineUpdate(item, field, v) {
+    const old = item[field] || 0;
+    item[field] = v;
+    window.logAudit("UPDATE", "Product", "inventory_items", item.code,
+      (field === "price" ? "Price " : "Cost ") + item.code + " " + fmt(old) + " → " + fmt(v) + " (quick edit)");
+    if (window.persist) window.persist("inventory");
+    pushToast && pushToast(item.code + (field === "price" ? " price " : " cost ") + fmt(old) + " → " + fmt(v));
+    bump();
+  }
+
   function saveItem(data, original) {
     // Record stock entered on the item form as a purchase, so it shows up in the
     // item's purchase history with its quantity (and builds a cost layer).
@@ -408,9 +455,9 @@ function Inventory({ go, pushToast }) {
                   <tr key={i.code} className={st === "dead" ? "row-dead" : st === "notmoving" ? "row-aging" : ""}>
                     <td className="mono strong">{i.code}</td>
                     <td>{i.name}<em className="cat-tag">{i.cat}</em></td>
-                    <td className="r mono">{fmt(itemAvgCost(i).avg)}</td>
-                    <td className="r mono">{fmt(itemAvgCost(i).last)}</td>
-                    <td className="r mono">{fmt(i.price)}</td>
+                    <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(itemAvgCost(i).avg)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>
+                    <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(itemAvgCost(i).last)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>
+                    <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.price} display={fmt(i.price)} title="Double-click to edit price" onSave={(v) => inlineUpdate(i, "price", v)} /></td>
                     <td className="r mono"><span className="pos">{fmt(margin)}</span> <em className="mpct">{mpct}%</em></td>
                     <td className="r mono strong">{i.stock}</td>
                     <td><AgeCell item={i} /></td>
