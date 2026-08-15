@@ -701,7 +701,10 @@ function storeBalances(filter) {
   (D.invoices || []).forEach((i) => {
     if (!storeMatch(i, filter)) return;
     const paid = i.paid || 0;
-    if (i.kind === "order") { cash += paid; deposits += paid; return; } // deposit held as liability
+    if (i.kind === "order") { // deposit held as a liability until sold or refunded
+      const refD = i.depositRefund || 0;
+      cash += paid - refD; deposits += paid - refD; return;
+    }
     cash += paid; // refunds are subtracted once, in the credit-note loop below (was double-counted here)
     ar += Math.max(0, (i.total || 0) - paid);
     deposits += Math.max(0, paid - (i.total || 0)); // overpayment kept as customer credit (liability)
@@ -737,7 +740,7 @@ function storeBalances(filter) {
     if (!storeMatch(po, filter)) return;
     if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
     const pay = (po.payment && +po.payment.amount) || 0;
-    payables += poBilledValue(po) - pay;
+    payables += poBilledValue(po) - pay + (po.shortWriteOff || 0);
   });
   // No Math.max(0,…) clamp: after netting input tax credits a return-heavy or
   // high-purchase period can legitimately leave a net GST *receivable* (negative
@@ -824,7 +827,7 @@ function supplierPayableRows(filter) {
     if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
     const pay = (po.payment && +po.payment.amount) || 0;
     const recvVal = poBilledValue(po);
-    const bal = +(recvVal - pay).toFixed(2);
+    const bal = +(recvVal - pay + (po.shortWriteOff || 0)).toFixed(2);
     if (Math.abs(bal) < 0.005) return;
     out.push({ ref: po.ref || po.po, supplier: po.supplier || "", date: po.date || "", recvVal: +recvVal.toFixed(2), paid: +pay.toFixed(2), bal });
   });
@@ -856,6 +859,14 @@ function liveAccountBalances(filter) {
       const dep = i.paid || 0;
       add(i.payMethod === "Cash" ? "1000" : "1010", dep);
       add("2200", dep);
+      // Cancelled order: the deposit goes back to the customer, which releases
+      // the liability and takes the money out again. Without this the customer
+      // credit sat on the books forever.
+      const refD = i.depositRefund || 0;
+      if (refD > 0.005) {
+        add(i.depositRefundAccount || (i.payMethod === "Cash" ? "1000" : "1010"), -refD);
+        add("2200", -refD);
+      }
       return;
     }
     let cogs = 0, goods = 0, svc = 0;
@@ -942,7 +953,12 @@ function liveAccountBalances(filter) {
     if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
     const pay = (po.payment && +po.payment.amount) || 0;
     if (pay > 0) add((po.payment && po.payment.account) === "1000" ? "1000" : "1010", -pay);
-    add("2000", poBilledValue(po) - pay);
+    // Closing an order short: goods paid for that will never arrive (and the
+    // freight already spent on them) are written off, clearing what the books
+    // otherwise carried forever as money the supplier still owed.
+    const woP = po.shortWriteOff || 0;
+    add("2000", poBilledValue(po) - pay + woP);
+    if (Math.abs(woP) > 0.005) add(po.shortWriteOffAcct || "5110", woP);
   });
   // Inventory is held company-wide → only shown in the combined view.
   bal["1300"] = (filter === "all" || !filter)
@@ -1016,6 +1032,12 @@ function ledgerLines(filter) {
       const dep = i.paid || 0;
       push(i.payMethod === "Cash" ? "1000" : "1010", i.date, "Deposit — order " + i.no, dep, 0, "invoiceview/" + i.no);
       push("2200", i.date, "Customer deposit — " + i.no, 0, dep, "invoiceview/" + i.no);
+      const refD = i.depositRefund || 0;
+      if (refD > 0.005) {
+        const rd = i.depositRefundDate || i.date;
+        push(i.depositRefundAccount || (i.payMethod === "Cash" ? "1000" : "1010"), rd, "Deposit refunded — " + i.no, 0, refD, "invoiceview/" + i.no);
+        push("2200", rd, "Deposit refunded — " + i.no, refD, 0, "invoiceview/" + i.no);
+      }
       return;
     }
     let cogs = 0, goods = 0, svc = 0;
@@ -1109,6 +1131,14 @@ function ledgerLines(filter) {
       push("2000", po.date, "Supplier payment — " + ref, pay, 0, poRef);
     }
     push("2000", po.date, "Goods received — " + ref, 0, poBilledValue(po), poRef);
+    const woP = po.shortWriteOff || 0;
+    if (Math.abs(woP) > 0.005) {
+      const wd = po.shortClosedAt || po.date;
+      // Clearing a prepayment the supplier will never settle: CREDIT the payable
+      // (it is carrying a debit balance) and charge the loss.
+      push("2000", wd, "Short-close write-off — " + ref, 0, woP, poRef);
+      push(po.shortWriteOffAcct || "5110", wd, "Undelivered goods written off — " + ref, woP, 0, poRef);
+    }
   });
   (D.journal || []).forEach((je) => {
     if (!je || !je.manual) return;

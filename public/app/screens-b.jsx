@@ -441,6 +441,28 @@ function Inventory({ go, pushToast, initTab }) {
     const owing = (!pseudo && typeof poBilledValue === "function") ? +(poBilledValue(po) - pay).toFixed(2) : 0;
     return { received, units, negatives, pay: pseudo ? 0 : pay, owing };
   }
+  // Close a part-delivered order that will never be completed. Anything already
+  // paid for goods that never arrived (and the freight spent on them) is written
+  // off, instead of sitting on the books forever as money the supplier owes.
+  async function closePOShort(po, writeOff) {
+    const ref = po.ref || po.po;
+    const snap = {};
+    try { snap.purchaseOrders = JSON.parse(JSON.stringify(D.purchaseOrders || [])); } catch (e) {}
+    po.status = "Closed short";
+    po.shortClosedAt = D.today;
+    if (writeOff > 0.005) { po.shortWriteOff = +writeOff.toFixed(2); po.shortWriteOffAcct = "5110"; }
+    (po.lines || []).forEach((l) => { if ((l.qtyReceived || 0) < (l.qty || 0)) l.closedShort = true; });
+    window.logAudit("POST", "Purchase", "purchaseOrders", ref,
+      "Closed order " + ref + " short" + (writeOff > 0.005 ? " · wrote off " + fmt(writeOff) + " of undelivered goods" : " · nothing to write off"));
+    const ok = window.persistNow ? await window.persistNow("purchaseOrders") : true;
+    if (!ok) {
+      if (snap.purchaseOrders) D.purchaseOrders = snap.purchaseOrders;
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+    } else {
+      pushToast && pushToast(ref + " closed short" + (writeOff > 0.005 ? " · " + fmt(writeOff) + " written off" : ""));
+    }
+    close(); bump();
+  }
   async function deletePO(po) {
     const ref = po.ref || po.po;
     const eff = poDeleteEffect(po);
@@ -677,7 +699,9 @@ function Inventory({ go, pushToast, initTab }) {
                       <td><Badge tone={statusTone(p.status)} dot>{p.status}</Badge>{hasDisc && <Badge tone="red" dot>Discrepancy</Badge>}</td>
                       <td className="row-acts">
                         <button className="icon-btn" title="Open order" onClick={() => go("po/" + ref)}><Icon name="eye" size={15} /></button>
-                        {p.status !== "Received" && <Btn variant="ghost" size="sm" icon="check" onClick={() => receiveOrder(p)}>Receive</Btn>}
+                        {p.status !== "Received" && p.status !== "Closed short" && <Btn variant="ghost" size="sm" icon="check" onClick={() => receiveOrder(p)}>Receive</Btn>}
+                        {_canInlineEdit && hasDisc && p.status !== "Closed short" &&
+                          <button className="icon-btn" title="Close this order short — the rest will never arrive" onClick={() => setModal({ type: "closepo", po: p })}><Icon name="check" size={15} /></button>}
                         {_canInlineEdit && <button className="icon-btn danger" title="Delete this purchase order" onClick={() => setModal({ type: "delpo", po: p })}><Icon name="trash" size={15} /></button>}
                       </td>
                     </tr>
@@ -729,6 +753,56 @@ function Inventory({ go, pushToast, initTab }) {
       {(modal && modal.type === "view") && <ItemViewModal item={modal.item} onClose={close} onEdit={() => setModal({ type: "edit", item: modal.item })} />}
       {(modal && modal.type === "delete") && <DeleteItemModal item={modal.item} onConfirm={() => deleteItem(modal.item)} onClose={close} />}
       {(modal && modal.type === "receivepo") && <ReceivePOModal po={modal.order} onConfirm={receivePO} onClose={close} />}
+      {(modal && modal.type === "closepo") && (() => {
+        const po = modal.po, ref = po.ref || po.po;
+        const lines = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+        const shortLines = lines.filter((l) => (l.qtyReceived || 0) < (l.qty || 0));
+        const pay = (po.payment && +po.payment.amount) || 0;
+        const billed = (typeof poBilledValue === "function") ? poBilledValue(po) : 0;
+        // Negative payable = money already paid for goods that never came.
+        const owedToUs = +(pay - billed).toFixed(2);
+        return (
+          <Modal title={"Close order " + ref + " short"} onClose={close}
+            footer={<>
+              <Btn variant="ghost" onClick={close}>Cancel</Btn>
+              {owedToUs > 0.005 && <Btn variant="ghost" icon="check" onClick={() => closePOShort(po, 0)}>Close · supplier will refund</Btn>}
+              <Btn variant="primary" icon="check" onClick={() => closePOShort(po, Math.max(0, owedToUs))}>
+                {owedToUs > 0.005 ? "Close · write off " + fmt(owedToUs) : "Close order"}
+              </Btn>
+            </>}>
+            <p style={{ marginBottom: 12 }}>
+              Marks <strong>{ref}</strong> ({supplierName(po.supplier)}) as finished even though{" "}
+              {shortLines.length} item{shortLines.length === 1 ? "" : "s"} never fully arrived. Stock already received stays as it is.
+            </p>
+            <table className="data-table" style={{ marginBottom: 12 }}>
+              <thead><tr><th>Item</th><th className="r">Ordered</th><th className="r">Received</th><th className="r">Never arrived</th></tr></thead>
+              <tbody>
+                {shortLines.map((l, i) => (
+                  <tr key={i}><td>{l.name || l.code}</td><td className="r mono">{l.qty || 0}</td>
+                    <td className="r mono">{l.qtyReceived || 0}</td>
+                    <td className="r mono strong">{(l.qty || 0) - (l.qtyReceived || 0)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            {owedToUs > 0.005 ? (
+              <>
+                <div className="inline-note" style={{ marginTop: 0 }}>
+                  <Icon name="alert" size={15} /> You paid <strong>{fmt(pay)}</strong> but only <strong>{fmt(billed)}</strong> of goods arrived,
+                  so <strong>{fmt(owedToUs)}</strong> is currently sitting on the books as money this supplier owes you.
+                </div>
+                <ul className="rail-note" style={{ paddingLeft: 18, lineHeight: 1.9 }}>
+                  <li><strong>Write it off</strong> — the {fmt(owedToUs)} becomes a loss (5110 Loss on Lost / Missing Stock) and the supplier balance clears. Use this when the money and goods are gone for good.</li>
+                  <li><strong>Supplier will refund</strong> — the order closes but the {fmt(owedToUs)} stays on the books as owed to you, until they refund or send the goods.</li>
+                </ul>
+              </>
+            ) : (
+              <div className="inline-note" style={{ marginTop: 0 }}>
+                <Icon name="check" size={15} /> Nothing was overpaid on this order, so closing it changes no money — it just stops showing as awaiting delivery.
+              </div>
+            )}
+          </Modal>
+        );
+      })()}
       {(modal && modal.type === "delpo") && (() => {
         const po = modal.po, ref = po.ref || po.po, eff = poDeleteEffect(po);
         return (

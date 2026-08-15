@@ -143,6 +143,7 @@ function InvoiceDetail({ no, go, pushToast }) {
   const [returnOpen, setReturnOpen] = useState(false);
   const [delOpen, setDelOpen] = useState(false);
   const [payEdit, setPayEdit] = useState(null); // payment record being corrected
+  const [depOpen, setDepOpen] = useState(false); // refunding a cancelled order's deposit
   const [priceSuggest, setPriceSuggest] = useState(false);
   const inv = D.invoices.find((i) => i.no === no);
   if (!inv) return <div><PageHead title="Invoice not found" actions={<Btn variant="ghost" icon="chevron" onClick={() => go("history")}>Back</Btn>} /><Card><Empty text={"No invoice " + no} /></Card></div>;
@@ -216,6 +217,28 @@ function InvoiceDetail({ no, go, pushToast }) {
       pushToast && pushToast("Payment corrected — " + fmt(before) + " → " + fmt(next.amount));
     }
     setPayEdit(null); force((x) => x + 1);
+  }
+
+  // Cancelling an order and giving the deposit back. Until now the money stayed
+  // on the books as a customer deposit with no way to release it.
+  async function refundDeposit(amount, acct) {
+    const snapKeys = ["invoices"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    inv.depositRefund = +(((inv.depositRefund || 0) + amount)).toFixed(2);
+    inv.depositRefundAccount = acct;
+    inv.depositRefundDate = D.today;
+    inv.orderCancelled = true;
+    window.logAudit("POST", "Deposit refund", "invoices", inv.no,
+      "Refunded deposit " + fmt(amount) + " on cancelled order " + inv.no + " · " + clientName(inv.clientId));
+    const ok = window.persistNow ? await window.persistNow("invoices") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+    } else {
+      pushToast && pushToast("Deposit of " + fmt(amount) + " refunded — " + inv.no + " cancelled");
+    }
+    setDepOpen(false); force((x) => x + 1);
   }
 
   const myReturns = D.creditNotes.filter((c) => c.origInv === inv.no);
@@ -403,8 +426,10 @@ function InvoiceDetail({ no, go, pushToast }) {
           <Btn variant="ghost" icon="download" onClick={downloadInvoice}>Download PDF</Btn>
           {inv.kind !== "order" && <Btn variant="ghost" icon="history" onClick={() => setReturnOpen(true)}>Return / Exchange</Btn>}
           {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="trash" onClick={() => setDelOpen(true)}>Delete</Btn>}
+          {inv.kind === "order" && (inv.paid || 0) - (inv.depositRefund || 0) > 0.005 &&
+            <Btn variant="ghost" icon="money" onClick={() => setDepOpen(true)}>Refund deposit</Btn>}
           {inv.kind === "order"
-            ? <Btn variant="primary" icon="check" onClick={convertOrder}>Convert to sales invoice</Btn>
+            ? (!inv.orderCancelled && <Btn variant="primary" icon="check" onClick={convertOrder}>Convert to sales invoice</Btn>)
             : (bal > 0.005 && <Btn variant="primary" icon="money" onClick={() => setPayOpen(true)}>Record payment</Btn>)}
         </>} />
 
@@ -582,6 +607,7 @@ function InvoiceDetail({ no, go, pushToast }) {
       {returnOpen && <InvoiceReturnModal inv={inv} onClose={() => setReturnOpen(false)} onSubmit={recordReturn} />}
       {payEdit && <PaymentFixModal pay={payEdit} inv={inv} onClose={() => setPayEdit(null)}
         onSave={(next) => updatePayment(payEdit, next)} onRemove={() => removePayment(payEdit)} />}
+      {depOpen && <DepositRefundModal inv={inv} onClose={() => setDepOpen(false)} onRefund={refundDeposit} />}
       {delOpen && (() => {
         const cns = (D.creditNotes || []).filter((c) => c.origInv === inv.no);
         const pays = (D.payments || []).filter((p) => p.inv === inv.no);
@@ -844,6 +870,40 @@ function InvoiceReturnModal({ inv, onClose, onSubmit }) {
           <strong>{fmt(refund || collect)}</strong>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+/* ---------------- Refund a deposit on a cancelled order ---------------- */
+function DepositRefundModal({ inv, onClose, onRefund }) {
+  const held = +(((inv.paid || 0) - (inv.depositRefund || 0))).toFixed(2);
+  const [amount, setAmount] = useState(String(held));
+  const [acct, setAcct] = useState(inv.payMethod === "Cash" ? "1000" : "1010");
+  const amt = Math.max(0, parseFloat(amount) || 0);
+  const valid = amt > 0.005 && amt <= held + 0.005;
+  return (
+    <Modal title={"Refund deposit — " + inv.no} onClose={onClose}
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="money" disabled={!valid} onClick={() => onRefund(+amt.toFixed(2), acct)}>Refund {fmt(amt)}</Btn>
+      </>}>
+      <p className="rail-note" style={{ marginBottom: 14 }}>
+        This order holds <strong>{fmt(held)}</strong> of customer deposit. Refunding gives it back and
+        releases the deposit from your books — the money leaves the account you choose, and the order
+        is marked cancelled so it can't be converted to a sale afterwards.
+      </p>
+      <div className="meta-grid">
+        <Field label="Refund amount" hint={held !== amt ? "Partial refunds are allowed" : "Full deposit"}>
+          <input type="number" step="0.01" min="0" max={held} value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="Paid from">
+          <select value={acct} onChange={(e) => setAcct(e.target.value)}>
+            <option value="1010">1010 · Bank</option>
+            <option value="1000">1000 · Cash on Hand</option>
+          </select>
+        </Field>
+      </div>
+      {amt > held + 0.005 && <div className="inline-note"><Icon name="alert" size={15} /> That is more than the deposit held on this order.</div>}
     </Modal>
   );
 }

@@ -596,11 +596,34 @@ audit-logged.
 - **Per-store filtering:** a return is attributed to the store of the invoice it came from, and
   per-store revenue adds up exactly to the combined view.
 
-### NOT audited in this pass (do not assume clean)
-Named explicitly so the boundary is honest. Each deserves the same treatment:
-- **Refunding an order deposit** — a customer cancelling a deposit-paid order has no flow (the
-  Return/Exchange button is hidden on order invoices), so it needs a manual journal entry today.
-- **Closing a purchase order short** — the freight already paid on units that never arrived isn't
-  expensed anywhere (carried over from Phase 8).
-- **Bank reconciliation** — only its key helpers are unit-tested, not a full cycle.
+---
+
+## Audit round 3: the remaining gaps (2026-08-15)
+
+### Refunding a deposit on a cancelled order  *(built)*
+A customer cancelling a deposit-paid order had no flow, so the money sat as a customer-deposit
+liability forever. Order invoices now have **Refund deposit**: choose the amount (full or partial)
+and the account it leaves from. The engine releases 2200 and takes the cash out; the ledger shows
+the deposit in and back out; the order is marked cancelled so it can no longer be converted to a
+sale. *Proven: full refund leaves bank and liability at 0.00 with both ledger accounts netting to
+zero; a partial refund leaves the remainder held.*
+
+### Closing a purchase order short  *(built)*
+A part-delivered order stayed "Partial" forever, and anything prepaid for goods that never arrived
+(with the freight spent on them) sat on the books as money the supplier still owed. Orders with a
+shortfall now offer **Close short**, with the choice stated plainly:
+- **Write it off** — the unrecovered amount becomes a loss (5110) and the supplier balance clears.
+- **Supplier will refund** — the order closes but the balance stays owed to you.
+*Proven: paying 112 for 67.20 of delivered goods leaves 44.80 owed by the supplier; writing it off
+clears the payable, charges the loss, drops the order from the A/P report and keeps the books in
+balance. The harness caught a sign error here — the write-off must CREDIT the payable, which is
+carrying a debit balance — so the ledger lines now tie to the derived figure.*
+
+### Bank reconciliation — full cycle verified  *(no change needed)*
+Ran a complete two-statement cycle on real books: the bank account's ledger lines add up to its
+balance; ticking everything up to a statement date gives a $0.00 difference; the next statement
+keeps the earlier lines cleared, counts nothing twice, and reconciles the account to zero. Cleared
+marks survive a reload, and editing a reconciled document releases exactly that one line.
+
+### NOT audited (do not assume clean)
 - **Barcode / label printing, email/WhatsApp delivery, attachments** — untouched by this audit.

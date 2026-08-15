@@ -816,6 +816,53 @@ function testPurchasingAndStores() {
     "converting the order releases the deposit and books the revenue");
   ok(Math.abs((bal["1200"] || 0) - 920) < 0.02, "the balance after the deposit stays receivable ($920.00)");
 
+  // --- Refunding a deposit on a cancelled order ---
+  D = base();
+  D.invoices = [{ no: "ORD-1", kind: "order", clientId: "c1", date: "2026-08-01", subtotal: 1000, gst: 50, pst: 70, total: 1120, paid: 200, payMethod: "Debit", lines: [],
+    depositRefund: 200, depositRefundAccount: "1010", depositRefundDate: "2026-08-20" }];
+  ctx = run(D); bal = ctx.liveAccountBalances("all");
+  ok(Math.abs(bal["2200"] || 0) < 0.02, "refunding a deposit releases the customer-deposit liability");
+  ok(Math.abs(bal["1010"] || 0) < 0.02, "refunding a deposit takes the money back out of the bank");
+  let LL = ctx.ledgerLines("all");
+  ok((LL["2200"] || []).length === 2 && Math.abs((LL["2200"] || []).reduce((s, l) => s + (l.cr - l.dr), 0)) < 0.02,
+    "deposit and its refund both appear on the ledger and net to zero");
+  ok((LL["1010"] || []).length === 2 && Math.abs((LL["1010"] || []).reduce((s, l) => s + (l.dr - l.cr), 0)) < 0.02,
+    "the bank shows money in and back out");
+  // partial refund keeps the remainder held
+  D = base();
+  D.invoices = [{ no: "ORD-2", kind: "order", clientId: "c1", date: "2026-08-01", subtotal: 1000, gst: 50, pst: 70, total: 1120, paid: 200, payMethod: "Debit", lines: [],
+    depositRefund: 50, depositRefundAccount: "1000" }];
+  bal = run(D).liveAccountBalances("all");
+  ok(Math.abs((bal["2200"] || 0) - 150) < 0.02, "a partial deposit refund leaves the rest held ($150.00)");
+  ok(Math.abs((bal["1000"] || 0) + 50) < 0.02, "a partial refund leaves from the chosen account");
+
+  // --- Closing a purchase order short ---
+  const shortPO = (extra) => {
+    const X = base();
+    X.purchaseOrders = [Object.assign({ po: "PO-S", ref: "PO-S", date: "2026-08-01", supplier: "s1", status: "Partial",
+      payment: { mode: "paid", amount: 112, account: "1010" },
+      lines: [{ code: "A", qty: 10, bonusQty: 0, cost: 10, landedUnit: 11.2, charge: 12, qtyReceived: 6 }], total: 112 }, extra || {})];
+    X.inventory = [{ code: "A", stock: 6, cost: 11.2 }];
+    return X;
+  };
+  bal = run(shortPO()).liveAccountBalances("all");
+  ok(Math.abs((bal["2000"] || 0) + 44.8) < 0.02, "paying 112 for 67.20 of delivered goods leaves 44.80 owed BY the supplier");
+  bal = run(shortPO({ status: "Closed short", shortClosedAt: "2026-08-31" })).liveAccountBalances("all");
+  ok(Math.abs((bal["2000"] || 0) + 44.8) < 0.02 && Math.abs(bal["5110"] || 0) < 0.02,
+    "closing short WITHOUT a write-off keeps the money owed by the supplier");
+  ctx = run(shortPO({ status: "Closed short", shortClosedAt: "2026-08-31", shortWriteOff: 44.8, shortWriteOffAcct: "5110" }));
+  bal = ctx.liveAccountBalances("all");
+  ok(Math.abs(bal["2000"] || 0) < 0.02, "writing off the shortfall clears the supplier balance");
+  ok(Math.abs((bal["5110"] || 0) - 44.8) < 0.02, "the written-off 44.80 is charged as a loss");
+  ok(ctx.supplierPayableRows("all").length === 0, "the A/P report drops the closed order, matching the balance");
+  LL = ctx.ledgerLines("all");
+  ok(Math.abs((LL["2000"] || []).reduce((s, l) => s + (l.cr - l.dr), 0) - (bal["2000"] || 0)) < 0.02,
+    "the write-off's ledger lines tie to the payable balance");
+  const acctsW = ctx.reportAccounts(bal);
+  const sumW = (t) => acctsW.filter((a) => a.type === t).reduce((s, a) => s + (bal[a.code] || 0), 0);
+  ok(Math.abs(sumW("Asset") - (sumW("Liability") + sumW("Equity") + (sumW("Revenue") - sumW("Expense")))) < 0.02,
+    "the books still balance after a short-close write-off");
+
   // Overpayment is held as customer credit, not negative A/R.
   D = base();
   D.invoices = [{ no: "I1", kind: "sale", clientId: "c1", date: "2026-08-01", subtotal: 100, gst: 5, pst: 7, total: 112, paid: 150, payMethod: "Debit", lines: [{ code: "A", qty: 1, price: 100, cost: 40 }] }];
