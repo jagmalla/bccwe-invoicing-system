@@ -451,3 +451,41 @@ and "Custom" renamed to "Date Search".
   COGS/profit is understated. Real COGS accrues on invoices created in the system with item costs.
 - Cash on Hand negative: more cash refunds/expenses were paid from 1000 than cash recorded in — drill
   the account to find the entries, then post a manual JE / opening balance to correct the till float.
+
+---
+
+## Money-trust build (advice accepted 2026-08-15)
+
+### Bank reconciliation  *(done)*
+- [x] New Accounting → **Reconcile** tab (gated by the existing `accounting.reconcile` permission).
+      Pick a bank/cash account (any Asset account except the 1300 snapshot), enter the statement end
+      date + ending balance, tick ledger lines as cleared. Live cells show previously-reconciled,
+      ticked-now, cleared balance and the difference; **Finish** enables only at a $0.00 difference.
+- [x] Cleared status is durable: stored in a new `reconciliations` collection keyed by stable line
+      identity (`date|memo|dr|cr|occurrence` — deterministic because `ledgerLines` sorts stably; an
+      edited source document changes its key and correctly reverts to uncleared). Past reconciliations
+      listed per account; admin can delete one, which un-clears its lines. Audit-logged both ways.
+- [x] Store-filter note: reconciling with a store filter active shows a warning to switch to All stores.
+
+### Supplier Payables (A/P) report  *(done)*
+- [x] New report "Supplier Payables (A/P)": per-PO open balances (received landed value − payments —
+      the SAME math as account 2000, harness-tied), grouped by supplier with subtotals, aging buckets
+      (Current/1–30/31–60/61–90/90+), PO links to the purchase-order page, negative = prepayment.
+      Excel export included.
+
+### GST/PST filing markers  *(done)*
+- [x] Tax report: "Mark <period> as filed" (permission: accounting reconcile/post) snapshots the
+      period's GST, ITCs, PST and total into a new `taxFilings` collection. Requires a bounded period
+      ("All time" refused). Overlap warning when the selected range intersects an already-filed period;
+      exact-duplicate periods blocked. Filed-periods table with admin delete. Audit-logged.
+
+### Year-end close  *(deferred — by design)*
+- [ ] A true close = locking documents dated in a closed year against edits. That touches every save
+      path (invoices, payments, returns, POS, expenses, POs) and deserves its own careful pass with
+      harness coverage per path. The pieces that motivated it are already covered: the P&L is
+      period-filtered and the Balance Sheet folds accumulated earnings into 3900 continuously.
+
+### Verification
+- [x] Harness → 82 checks green. New: recon keys distinct for identical lines + deterministic across
+      recomputes; supplier-payables rows tie to the derived 2000 balance; range-overlap logic
+      (adjacent months don't overlap, shared boundary day does).

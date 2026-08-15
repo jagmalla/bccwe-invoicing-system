@@ -326,6 +326,29 @@ function testAccountingEngine() {
   ok((lines["1010"] || []).some((l) => l.ref === "invoiceview/INV-1"), "payment line links to its invoice");
   ok((lines["2000"] || []).some((l) => l.ref === "po/PO-1"), "payable line links to its purchase order");
 
+  // Reconciliation line keys: identical lines get distinct, deterministic keys.
+  const dupLines = [
+    { date: "2026-08-01", memo: "Payment — INV-1", dr: 60, cr: 0 },
+    { date: "2026-08-01", memo: "Payment — INV-1", dr: 60, cr: 0 },
+    { date: "2026-08-02", memo: "Expense — Rent", dr: 0, cr: 535 },
+  ];
+  const keyed1 = ctx.reconKeyedLines(dupLines);
+  const keyed2 = ctx.reconKeyedLines(dupLines);
+  ok(keyed1.length === 3 && new Set(keyed1.map((l) => l.key)).size === 3, "recon keys: duplicates get distinct keys");
+  ok(keyed1.every((l, i) => l.key === keyed2[i].key), "recon keys: deterministic across recomputes");
+
+  // Supplier payables rows mirror the 2000 A/P balance.
+  const ap = ctx.supplierPayableRows("all");
+  ok(ap.length === 1 && ap[0].ref === "PO-1" && Math.abs(ap[0].bal - 20) < 0.005,
+    "supplier payables: PO-1 received 50, paid 30 → owing 20");
+  ok(Math.abs(ap.reduce((s, r) => s + r.bal, 0) - (bal["2000"] || 0)) < 0.02,
+    "supplier payables total ties to account 2000");
+
+  // Tax-filing period overlap detection.
+  ok(ctx.rangesOverlap({ from: "2026-01-01", to: "2026-03-31" }, { from: "2026-03-01", to: "2026-03-31" }), "overlap: quarter vs its last month");
+  ok(!ctx.rangesOverlap({ from: "2026-01-01", to: "2026-01-31" }, { from: "2026-02-01", to: "2026-02-28" }), "overlap: adjacent months do not overlap");
+  ok(ctx.rangesOverlap({ from: "2026-02-01", to: "2026-02-28" }, { from: "2026-02-28", to: "2026-03-31" }), "overlap: shared boundary day counts");
+
   // Month period ("m:YYYY-MM") — extract the real periodRange from ui.jsx.
   const uiSrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
   const pr = new Function("BCCWE", "monthLabel", "shortDate",

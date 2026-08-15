@@ -907,6 +907,21 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 .drill-head .stmt-title { margin-bottom: 2px; }
 .drill-head .btn svg { transform: rotate(180deg); }
 .period-month { width: auto; padding: 6px 9px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink-2); }
+/* bank reconciliation */
+.recon-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); background: var(--surface-2); }
+.recon-cell { display: flex; flex-direction: column; gap: 3px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); min-width: 130px; }
+.recon-cell span { font-size: 11px; color: var(--ink-3); font-weight: 600; }
+.recon-cell strong { font-size: 14.5px; }
+.recon-cell.ok { border-color: var(--green); background: var(--green-soft); }
+.recon-cell.ok strong { color: var(--green); }
+.recon-cell.warn { border-color: var(--red); background: var(--red-soft); }
+.recon-cell.warn strong { color: var(--red); }
+.recon-summary .btn { margin-left: auto; }
+tr.recon-on { background: var(--accent-soft); }
+/* supplier payables */
+.ap-subtotal td { background: var(--surface-2); border-bottom: 2px solid var(--line); font-size: 12.5px; }
+/* tax filing marker */
+.tax-file-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 .data-table.tb td { padding: 8px 14px; }
 .aging-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 22px; }
 .aging-cell { padding: 14px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 5px; }

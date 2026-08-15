@@ -100,6 +100,7 @@ function Accounting({ store, pushToast }) {
         <button className={"tab" + (tab === "balance" ? " on" : "")} onClick={() => setTab("balance")}>Balance sheet</button>
         <button className={"tab" + (tab === "journal" ? " on" : "")} onClick={() => setTab("journal")}>General journal</button>
         <button className={"tab" + (tab === "ledger" ? " on" : "")} onClick={() => setTab("ledger")}>General ledger</button>
+        {acctCan("reconcile") && <button className={"tab" + (tab === "reconcile" ? " on" : "")} onClick={() => setTab("reconcile")}>Reconcile</button>}
       </div>
 
       {tab === "coa" && (() => {
@@ -178,6 +179,7 @@ function Accounting({ store, pushToast }) {
       )}
 
       {tab === "ledger" && <Ledger store={sf} key={ledgerAcct || "default"} initAcct={ledgerAcct} />}
+      {tab === "reconcile" && acctCan("reconcile") && <Reconcile store={sf} pushToast={pushToast} />}
 
       {modal && modal.type === "acct" && <AccountFormModal acct={modal.acct} onSave={saveAccount} onClose={() => setModal(null)} />}
       {modal && modal.type === "mje" && <ManualJEModal onSave={saveManualJE} onClose={() => setModal(null)} />}
@@ -256,6 +258,145 @@ function Ledger({ store, initAcct }) {
         )}
       </table>
     </Card>
+  );
+}
+
+/* ---------------- Bank reconciliation ----------------
+   Tick ledger lines against a bank/cash statement. Cleared lines are stored in
+   the `reconciliations` collection (per account, by stable line key), so once a
+   line is reconciled it stays reconciled across sessions and devices. */
+function Reconcile({ store, pushToast }) {
+  const D = BCCWE;
+  const sf = store || "all";
+  if (!D.reconciliations) D.reconciliations = [];
+  const isAdmin = !!(window.STORES && window.STORES.isAdmin());
+  const acctOpts = (D.accounts || []).filter((a) => a.type === "Asset" && a.code !== "1300");
+  const [acct, setAcct] = useState("1010");
+  const [stmtDate, setStmtDate] = useState(D.today);
+  const [stmtBal, setStmtBal] = useState("");
+  const [ticked, setTicked] = useState({});
+  const [confirmDel, setConfirmDel] = useState("");
+  const [, _r] = useState(0);
+  const bump = () => _r((x) => x + 1);
+
+  const allLines = reconKeyedLines(ledgerLines(sf)[acct] || []);
+  const clearedKeys = {};
+  D.reconciliations.forEach((r) => { if (r.acct === acct) (r.keys || []).forEach((k) => { clearedKeys[k] = r.id; }); });
+  const inScope = allLines.filter((l) => l.date <= stmtDate);
+  const signed = (l) => (l.dr || 0) - (l.cr || 0); // asset accounts are debit-normal
+  const clearedPrev = inScope.filter((l) => clearedKeys[l.key]).reduce((s, l) => s + signed(l), 0);
+  const open = inScope.filter((l) => !clearedKeys[l.key]);
+  const tickedLines = open.filter((l) => ticked[l.key]);
+  const tickedSum = tickedLines.reduce((s, l) => s + signed(l), 0);
+  const clearedBal = clearedPrev + tickedSum;
+  const stmtNum = parseFloat(stmtBal);
+  const hasStmt = !isNaN(stmtNum);
+  const diff = hasStmt ? +(stmtNum - clearedBal).toFixed(2) : 0;
+  const canFinish = hasStmt && Math.abs(diff) < 0.005;
+  const aName = (acctOpts.find((a) => a.code === acct) || {}).name || "";
+  const past = D.reconciliations.filter((r) => r.acct === acct).sort((a, b) => String(b.stmtDate).localeCompare(String(a.stmtDate)));
+
+  const switchAcct = (v) => { setAcct(v); setTicked({}); setStmtBal(""); setConfirmDel(""); };
+  const tickAll = (on) => { const n = {}; if (on) open.forEach((l) => { n[l.key] = true; }); setTicked(n); };
+
+  function finish() {
+    if (!canFinish) return;
+    const rec = {
+      id: "rec_" + Date.now().toString(36),
+      acct, stmtDate, stmtBalance: +stmtNum.toFixed(2),
+      keys: tickedLines.map((l) => l.key),
+      clearedTotal: +tickedSum.toFixed(2),
+      at: D.today, by: sessionWho(), store: sf,
+    };
+    D.reconciliations.push(rec);
+    if (window.persist) window.persist("reconciliations");
+    window.logAudit && window.logAudit("POST", "Reconciliation", "reconciliations", acct,
+      "Reconciled " + acct + " " + aName + " to " + fmt(stmtNum) + " as of " + stmtDate + " · " + tickedLines.length + " line(s) cleared");
+    pushToast && pushToast(acct + " reconciled to " + fmt(stmtNum) + " — " + tickedLines.length + " line(s) cleared");
+    setTicked({}); setStmtBal("");
+    bump();
+  }
+  function removeRecon(id) {
+    const i = D.reconciliations.findIndex((r) => r.id === id);
+    if (i < 0) return;
+    const r = D.reconciliations[i];
+    D.reconciliations.splice(i, 1);
+    if (window.persist) window.persist("reconciliations");
+    window.logAudit && window.logAudit("DELETE", "Reconciliation", "reconciliations", r.acct,
+      "Deleted reconciliation of " + r.acct + " as of " + r.stmtDate + " — " + (r.keys || []).length + " line(s) un-cleared");
+    pushToast && pushToast("Reconciliation deleted — its lines are open again");
+    setConfirmDel("");
+    bump();
+  }
+
+  return (
+    <div>
+      <Card pad={false}>
+        <div className="toolbar">
+          <Field label="">
+            <select className="tool-select wide" value={acct} onChange={(e) => switchAcct(e.target.value)}>
+              {acctOpts.map((a) => <option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
+            </select>
+          </Field>
+          <Field label=""><input type="date" value={stmtDate} onChange={(e) => { setStmtDate(e.target.value); setTicked({}); }} title="Statement end date" /></Field>
+          <Field label=""><input type="number" step="0.01" placeholder="Statement ending balance" value={stmtBal} onChange={(e) => setStmtBal(e.target.value)} style={{ width: 190 }} /></Field>
+        </div>
+        {sf !== "all" && <div className="inline-note" style={{ margin: "0 16px 10px" }}><Icon name="alert" size={15} /> A store filter is active — switch the top bar to “All stores” to reconcile the account's complete activity.</div>}
+        <div className="recon-summary">
+          <div className="recon-cell"><span>Reconciled before this</span><strong className="mono">{fmt(clearedPrev)}</strong></div>
+          <div className="recon-cell"><span>Ticked now ({tickedLines.length})</span><strong className="mono">{fmt(tickedSum)}</strong></div>
+          <div className="recon-cell"><span>Cleared balance</span><strong className="mono">{fmt(clearedBal)}</strong></div>
+          <div className={"recon-cell" + (hasStmt ? (canFinish ? " ok" : " warn") : "")}>
+            <span>{hasStmt ? "Difference vs statement" : "Enter the statement balance"}</span>
+            <strong className="mono">{hasStmt ? fmt(diff) : "—"}</strong>
+          </div>
+          <Btn variant="primary" icon="check" disabled={!canFinish} onClick={finish}>
+            {canFinish ? "Finish reconciliation" : "Difference must be $0.00"}
+          </Btn>
+        </div>
+        <table className="data-table">
+          <thead><tr>
+            <th style={{ width: 34 }}><input type="checkbox" checked={open.length > 0 && tickedLines.length === open.length} onChange={(e) => tickAll(e.target.checked)} title="Tick all" /></th>
+            <th>Date</th><th>Detail</th><th className="r">Money in</th><th className="r">Money out</th>
+          </tr></thead>
+          <tbody>
+            {open.map((l) => (
+              <tr key={l.key} className={ticked[l.key] ? "recon-on" : ""} onClick={() => setTicked((t) => Object.assign({}, t, { [l.key]: !t[l.key] }))} style={{ cursor: "pointer" }}>
+                <td><input type="checkbox" checked={!!ticked[l.key]} onChange={() => {}} /></td>
+                <td className="muted">{shortDate(l.date)}</td>
+                <td>{l.memo}</td>
+                <td className="r mono">{l.dr > 0.005 ? fmtPlain(l.dr) : "—"}</td>
+                <td className="r mono">{l.cr > 0.005 ? fmtPlain(l.cr) : "—"}</td>
+              </tr>
+            ))}
+            {!open.length && <tr><td colSpan="5"><Empty icon="check" text={"Nothing left to reconcile up to " + shortDate(stmtDate)} /></td></tr>}
+          </tbody>
+        </table>
+      </Card>
+
+      <Card title={"Past reconciliations — " + acct + " · " + aName} pad={false}>
+        <table className="data-table">
+          <thead><tr><th>Statement date</th><th className="r">Statement balance</th><th className="r">Lines cleared</th><th>Done on</th><th>By</th><th /></tr></thead>
+          <tbody>
+            {past.map((r) => (
+              <tr key={r.id}>
+                <td>{shortDate(r.stmtDate)}</td>
+                <td className="r mono">{fmt(r.stmtBalance)}</td>
+                <td className="r mono">{(r.keys || []).length}</td>
+                <td className="muted">{shortDate(r.at)}</td>
+                <td className="muted">{r.by || "—"}</td>
+                <td className="row-acts">
+                  {isAdmin && (confirmDel === r.id
+                    ? <span className="del-confirm"><Btn variant="danger" size="sm" icon="trash" onClick={() => removeRecon(r.id)}>Confirm</Btn><Btn variant="ghost" size="sm" onClick={() => setConfirmDel("")}>Cancel</Btn></span>
+                    : <button className="icon-btn danger" title="Delete (un-clears its lines)" onClick={() => setConfirmDel(r.id)}><Icon name="trash" size={15} /></button>)}
+                </td>
+              </tr>
+            ))}
+            {!past.length && <tr><td colSpan="6"><Empty icon="book" text="No reconciliations yet for this account" /></td></tr>}
+          </tbody>
+        </table>
+      </Card>
+    </div>
   );
 }
 
@@ -570,6 +711,63 @@ function storeBalances(filter) {
 function storeLabel(filter) {
   if (!filter || filter === "all") return "All stores (combined)";
   return (window.STORES && window.STORES.nameOf(filter)) || "Store";
+}
+
+// Granular accounting-module permission (admin always allowed; roles without a
+// permission record are not locked out — same policy as navAllowed).
+function acctCan(perm) {
+  if (window.STORES && window.STORES.isAdmin()) return true;
+  const sess = window.__session || {};
+  const roles = BCCWE.roles || [];
+  const role = roles.find((r) => r.id === sess.roleId) || roles.find((r) => r.name === sess.role);
+  const p = role && role.perms && role.perms.accounting;
+  if (!p) return true;
+  return !!p[perm];
+}
+function sessionWho() {
+  const s = window.__session || {};
+  return s.name || s.userId || "";
+}
+
+// Stable identity for a derived ledger line, so a bank reconciliation can mark
+// lines cleared even though the ledger is recomputed on every load. The key is
+// the line's own facts plus an occurrence index (two identical payments on the
+// same day get distinct keys deterministically, because ledgerLines sorts by
+// date with a stable sort). If a source document is edited, its line's key
+// changes and the line correctly reverts to "uncleared".
+function reconKeyedLines(lines) {
+  const seen = {};
+  return (lines || []).map((l) => {
+    const base = l.date + "|" + (l.memo || "") + "|" + (+l.dr || 0).toFixed(2) + "|" + (+l.cr || 0).toFixed(2);
+    const n = (seen[base] = (seen[base] || 0) + 1);
+    return Object.assign({}, l, { key: base + "|" + n });
+  });
+}
+
+// Per-purchase-order open supplier balances — the same math that puts 2000
+// Accounts Payable on the Balance Sheet, kept as rows so the A/P report and
+// the balance always agree. Negative balance = prepayment to the supplier.
+function supplierPayableRows(filter) {
+  const D = BCCWE;
+  const out = [];
+  (D.purchaseOrders || []).forEach((po) => {
+    if (!storeMatch(po, filter)) return;
+    if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
+    const pay = (po.payment && +po.payment.amount) || 0;
+    let recvVal = 0;
+    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
+    const bal = +(recvVal - pay).toFixed(2);
+    if (Math.abs(bal) < 0.005) return;
+    out.push({ ref: po.ref || po.po, supplier: po.supplier || "", date: po.date || "", recvVal: +recvVal.toFixed(2), paid: +pay.toFixed(2), bal });
+  });
+  return out;
+}
+
+// Do two date ranges {from,to} overlap? Used to warn when a GST/PST period
+// being filed intersects a period already marked as filed.
+function rangesOverlap(a, b) {
+  return a.from <= b.to && b.from <= a.to;
 }
 
 // Live account balances, recomputed from every transaction so the ledger,
@@ -987,6 +1185,7 @@ function Reports({ store, pushToast, go }) {
     { id: "tb", name: "Trial Balance", ico: "book" },
     { id: "tax", name: "GST/PST Remittance", ico: "receipt" },
     { id: "aging", name: "Unpaid Invoices (Aging)", ico: "invoice" },
+    { id: "ap", name: "Supplier Payables (A/P)", ico: "truck" },
     { id: "client", name: "Income by Client", ico: "people" },
   ];
 
@@ -1055,6 +1254,14 @@ function Reports({ store, pushToast, go }) {
         data: open.map((i) => ({ no: i.no, client: clientName(i.clientId), due: i.due || "", balance: money(invOpenBalance(i)), status: invStatus(i) })),
         opts: { title: "BCCWE — A/R Aging", subtitle: storeLabel(sf) + " · as of " + BCCWE.today } };
     }
+    if (report === "ap") {
+      const rows = supplierPayableRows(sf).sort((a, b) => String(a.supplier).localeCompare(String(b.supplier)) || String(a.date).localeCompare(String(b.date)));
+      return { filename: "BCCWE-SupplierPayables-" + safeLbl, sheet: "Supplier Payables",
+        cols: [{ key: "supplier", label: "Supplier", type: "text" }, { key: "ref", label: "PO", type: "text" }, { key: "date", label: "Date", type: "text" }, { key: "recvVal", label: "Received value", type: "number" }, { key: "paid", label: "Paid", type: "number" }, { key: "bal", label: "Balance owing", type: "number" }],
+        data: rows.map((r) => ({ supplier: (typeof supplierName === "function" ? supplierName(r.supplier) : r.supplier) || "(no supplier)", ref: r.ref, date: r.date, recvVal: r.recvVal, paid: r.paid, bal: r.bal })),
+        opts: { title: "BCCWE — Supplier Payables (A/P)", subtitle: storeLabel(sf) + " · as of " + BCCWE.today,
+          totals: { bal: money(rows.reduce((s, r) => s + r.bal, 0)) } } };
+    }
     if (report === "client") {
       const map = {};
       (D.invoices || []).forEach((i) => { if (i.kind === "order" || !storeMatch(i, sf) || (dated && !inRange(i.date || "", range))) return; map[i.clientId] = (map[i.clientId] || 0) + ((i.total || 0) - (i.gst || 0) - (i.pst || 0)); });
@@ -1111,8 +1318,9 @@ function Reports({ store, pushToast, go }) {
                 {report === "pl" && <PLReport store={sf} range={range} onDrill={setDrill} />}
                 {report === "bs" && <BalanceSheet store={sf} onDrill={setDrill} />}
                 {report === "tb" && <TrialBalance store={sf} />}
-                {report === "tax" && <TaxReport store={sf} range={range} />}
+                {report === "tax" && <TaxReport store={sf} range={range} period={period} pushToast={pushToast} />}
                 {report === "aging" && <AgingReport store={sf} go={go} />}
+                {report === "ap" && <APAgingReport store={sf} go={go} />}
                 {report === "client" && <ClientReport store={sf} range={range} go={go} />}
               </>}
           </div>
@@ -1258,9 +1466,48 @@ function TrialBalance({ store }) {
   );
 }
 
-function TaxReport({ store, range }) {
+function TaxReport({ store, range, period, pushToast }) {
+  const D = BCCWE;
   const sf = store || "all";
+  if (!D.taxFilings) D.taxFilings = [];
   const f = storeFinance(sf, range);
+  const isAdmin = !!(window.STORES && window.STORES.isAdmin());
+  const canFile = acctCan("reconcile");
+  const bounded = period && period !== "all"; // a filing must cover a specific period
+  const [confirmDel, setConfirmDel] = useState("");
+  const [, _r] = useState(0);
+  const bump = () => _r((x) => x + 1);
+  const total = f.gst - f.gstITC + f.pst;
+  const overlaps = range ? D.taxFilings.filter((x) => rangesOverlap({ from: x.from, to: x.to }, range)) : [];
+  const alreadyFiled = overlaps.some((x) => x.from === range.from && x.to === range.to);
+
+  function markFiled() {
+    if (!bounded || !canFile) return;
+    D.taxFilings.push({
+      id: "tf_" + Date.now().toString(36),
+      from: range.from, to: range.to, label: range.label, store: sf,
+      gst: +f.gst.toFixed(2), itc: +f.gstITC.toFixed(2), pst: +f.pst.toFixed(2), total: +total.toFixed(2),
+      at: D.today, by: sessionWho(),
+    });
+    if (window.persist) window.persist("taxFilings");
+    window.logAudit && window.logAudit("POST", "Tax filing", "taxFilings", range.label,
+      "Marked GST/PST as filed for " + range.label + " · " + fmt(total) + " (" + storeLabel(sf) + ")");
+    pushToast && pushToast("Marked " + range.label + " as filed — " + fmt(total));
+    bump();
+  }
+  function removeFiling(id) {
+    const i = D.taxFilings.findIndex((x) => x.id === id);
+    if (i < 0) return;
+    const x = D.taxFilings[i];
+    D.taxFilings.splice(i, 1);
+    if (window.persist) window.persist("taxFilings");
+    window.logAudit && window.logAudit("DELETE", "Tax filing", "taxFilings", x.label, "Removed filed marker for " + x.label);
+    pushToast && pushToast("Filing marker removed — " + x.label);
+    setConfirmDel("");
+    bump();
+  }
+
+  const filings = D.taxFilings.slice().sort((a, b) => String(b.to).localeCompare(String(a.to)));
   return (
     <div className="statement">
       <h3 className="stmt-title">GST / PST Remittance — {storeLabel(sf)}{range ? " · " + range.label : ""}</h3>
@@ -1270,8 +1517,48 @@ function TaxReport({ store, range }) {
       <StatementRow label="Net GST due" value={fmt(f.gst - f.gstITC)} bold />
       <div className="stmt-sec">PST</div>
       <StatementRow label="PST collected (no input credits in BC)" value={fmt(f.pst)} indent />
-      <StatementRow label="Total remittance due" value={fmt(f.gst - f.gstITC + f.pst)} total />
-      <div className="stmt-note">GST due nets input tax credits on expenses; BC PST paid on purchases is not recoverable and is included in expense cost. Purchase orders are not yet posted here (Phase 8).</div>
+      <StatementRow label="Total remittance due" value={fmt(total)} total />
+
+      {overlaps.length > 0 && (
+        <div className="inline-note">
+          <Icon name="alert" size={15} /> {alreadyFiled
+            ? "This exact period is already marked as filed (" + overlaps.map((x) => x.label).join(", ") + ")."
+            : "Careful — this period overlaps filing(s) already marked: " + overlaps.map((x) => x.label).join(", ") + ". The figures above include dates you may have already remitted."}
+        </div>
+      )}
+      {canFile && (
+        <div className="tax-file-row">
+          <Btn variant="primary" icon="check" disabled={!bounded || alreadyFiled} onClick={markFiled}>
+            {alreadyFiled ? "Period already filed" : bounded ? "Mark " + (range ? range.label : "") + " as filed" : "Pick a specific period to file"}
+          </Btn>
+          {!bounded && <span className="muted" style={{ fontSize: 12 }}>Choose a month, year or date range above — “All time” can't be marked as filed.</span>}
+        </div>
+      )}
+
+      <h4 className="stmt-sec" style={{ marginTop: 22 }}>Filed periods</h4>
+      <table className="data-table">
+        <thead><tr><th>Period</th><th>Store</th><th className="r">Net GST</th><th className="r">PST</th><th className="r">Total remitted</th><th>Filed on</th><th>By</th><th /></tr></thead>
+        <tbody>
+          {filings.map((x) => (
+            <tr key={x.id}>
+              <td className="strong">{x.label}</td>
+              <td className="muted">{storeLabel(x.store)}</td>
+              <td className="r mono">{fmt((x.gst || 0) - (x.itc || 0))}</td>
+              <td className="r mono">{fmt(x.pst || 0)}</td>
+              <td className="r mono strong">{fmt(x.total || 0)}</td>
+              <td className="muted">{shortDate(x.at)}</td>
+              <td className="muted">{x.by || "—"}</td>
+              <td className="row-acts">
+                {isAdmin && (confirmDel === x.id
+                  ? <span className="del-confirm"><Btn variant="danger" size="sm" icon="trash" onClick={() => removeFiling(x.id)}>Confirm</Btn><Btn variant="ghost" size="sm" onClick={() => setConfirmDel("")}>Cancel</Btn></span>
+                  : <button className="icon-btn danger" title="Remove filed marker" onClick={() => setConfirmDel(x.id)}><Icon name="trash" size={15} /></button>)}
+              </td>
+            </tr>
+          ))}
+          {!filings.length && <tr><td colSpan="8"><Empty icon="receipt" text="No periods marked as filed yet" /></td></tr>}
+        </tbody>
+      </table>
+      <div className="stmt-note">GST due nets input tax credits on expenses; BC PST paid on purchases is not recoverable and is included in expense cost. Marking a period as filed records the figures for your records — it does not change the books.</div>
     </div>
   );
 }
@@ -1319,6 +1606,66 @@ function AgingReport({ store, go }) {
           <td>{go ? <button className="link" onClick={() => go("client/" + i.clientId)}>{clientName(i.clientId)}</button> : clientName(i.clientId)}</td>
           <td className="muted">{shortDate(i.due)}</td><td className="r mono">{fmt(invOpenBalance(i))}</td><td><Badge tone={statusTone(invStatus(i))} dot>{invStatus(i)}</Badge></td></tr>)}</tbody>
       </table>
+    </div>
+  );
+}
+
+/* ---------------- Supplier payables (A/P aging) ---------------- */
+function APAgingReport({ store, go }) {
+  const D = BCCWE;
+  const sf = store || "all";
+  const rows = supplierPayableRows(sf);
+  const today = new Date(D.today);
+  const buckets = { "Current": 0, "1–30": 0, "31–60": 0, "61–90": 0, "90+": 0 };
+  rows.forEach((r) => {
+    const age = Math.floor((today - new Date(r.date + "T00:00:00")) / 86400000);
+    const k = age <= 0 ? "Current" : age <= 30 ? "1–30" : age <= 60 ? "31–60" : age <= 90 ? "61–90" : "90+";
+    buckets[k] += r.bal;
+  });
+  // Group by supplier, biggest balance first; POs oldest first within a group.
+  const bySup = {};
+  rows.forEach((r) => { (bySup[r.supplier] = bySup[r.supplier] || []).push(r); });
+  const groups = Object.entries(bySup)
+    .map(([sup, list]) => ({ sup, name: (typeof supplierName === "function" ? supplierName(sup) : sup) || "(no supplier)", list: list.sort((a, b) => String(a.date).localeCompare(String(b.date))), total: list.reduce((s, r) => s + r.bal, 0) }))
+    .sort((a, b) => b.total - a.total);
+  const grand = rows.reduce((s, r) => s + r.bal, 0);
+  return (
+    <div className="statement">
+      <h3 className="stmt-title">Supplier Payables — {storeLabel(sf)} · as of {shortDate(D.today)}</h3>
+      <div className="aging-row">
+        {Object.entries(buckets).map(([k, v]) => (
+          <div className={"aging-cell" + (k !== "Current" && v > 0.005 ? " warn" : "")} key={k}>
+            <span className="ag-lbl">{k} days</span>
+            <span className="ag-val mono">{fmt(v)}</span>
+          </div>
+        ))}
+      </div>
+      <table className="data-table">
+        <thead><tr><th>Supplier</th><th>Purchase order</th><th>Date</th><th className="r">Received value</th><th className="r">Paid</th><th className="r">Balance owing</th></tr></thead>
+        <tbody>
+          {groups.map((g) => (
+            <React.Fragment key={g.sup || "none"}>
+              {g.list.map((r, i) => (
+                <tr key={r.ref}>
+                  <td className="strong">{i === 0 ? g.name : ""}</td>
+                  <td className="mono">{go ? <button className="link mono" onClick={() => go("po/" + r.ref)}>{r.ref}</button> : r.ref}</td>
+                  <td className="muted">{shortDate(r.date)}</td>
+                  <td className="r mono">{fmtPlain(r.recvVal)}</td>
+                  <td className="r mono">{r.paid > 0.005 ? fmtPlain(r.paid) : "—"}</td>
+                  <td className={"r mono strong" + (r.bal < 0 ? " neg" : "")}>{fmt(r.bal)}</td>
+                </tr>
+              ))}
+              <tr className="ap-subtotal">
+                <td colSpan="5" className="r strong">{g.name} total</td>
+                <td className={"r mono strong" + (g.total < 0 ? " neg" : "")}>{fmt(g.total)}</td>
+              </tr>
+            </React.Fragment>
+          ))}
+          {!rows.length && <tr><td colSpan="6"><Empty icon="truck" text="Nothing owed to suppliers — all received orders are paid" /></td></tr>}
+        </tbody>
+        {rows.length > 0 && <tfoot><tr><td colSpan="5" className="r strong">Total supplier payables</td><td className="r mono strong">{fmt(grand)}</td></tr></tfoot>}
+      </table>
+      <div className="stmt-note">Received value minus payments per purchase order — the same math as account 2000 on the Balance Sheet, so the two always agree. A negative balance is a prepayment (deposit) with the supplier. Record payments on the purchase order.</div>
     </div>
   );
 }
