@@ -265,11 +265,34 @@ function App() {
   );
 }
 
+// Shown when login succeeded but /api/state failed (DB outage, server error).
+// Booting the app would show the seed/demo books as if they were real data —
+// a hard stop with a retry is the only honest option.
+function LoadFailedScreen() {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#f6f4f1", fontFamily: "'Hanken Grotesk', system-ui, sans-serif" }}>
+      <div style={{ background: "#fff", borderRadius: 16, boxShadow: "0 12px 40px rgba(0,0,0,.12)", padding: "34px 36px", maxWidth: 440, textAlign: "center" }}>
+        <div style={{ width: 52, height: 52, borderRadius: 14, background: "#fbe7e6", color: "#b3322d", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+          <Icon name="alert" size={26} />
+        </div>
+        <h2 style={{ margin: "0 0 8px", fontSize: 19, color: "#1c2530" }}>Can't load your data</h2>
+        <p style={{ margin: "0 0 18px", fontSize: 14, color: "#5a6877", lineHeight: 1.55 }}>
+          You're logged in, but the server couldn't return your business data
+          (error {String(window.__loadFailed)}). Nothing has been changed or lost —
+          this is usually a brief database hiccup on the host.
+        </p>
+        <button className="btn btn-primary" onClick={() => location.reload()}>Try again</button>
+      </div>
+    </div>
+  );
+}
+
 // Gate the whole app behind login. data.js has already validated any saved
 // token and set window.__authed / window.__session during boot.
 function Root() {
   if (!window.__authed) return <LoginScreen />;
   if (window.__session && window.__session.mustChange) return <ForceChange />;
+  if (window.__loadFailed) return <LoadFailedScreen />;
   return <App />;
 }
 

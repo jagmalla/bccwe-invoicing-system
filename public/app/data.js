@@ -1365,6 +1365,13 @@
         seedXhr.send(JSON.stringify(seed));
       }
       window.__dataLoaded = true; // safe to save from here on
+    } else {
+      // Logged in but the data could not be loaded (DB outage / server error).
+      // Do NOT boot the app on the seed/demo data pretending it's real — the
+      // owner would be looking at fictitious books. Flag it; the shell shows a
+      // hard "can't load your data" screen instead. Saving stays disabled
+      // (__dataLoaded is false), so nothing can overwrite the database either.
+      window.__loadFailed = st.status || "network";
     }
   }
 
@@ -1395,7 +1402,19 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(toSave),
-      }).catch(function (e) { console.error("Save failed:", e); });
+      }).then(function (res) {
+        if (res && res.ok) return;
+        // HTTP failure resolves (not rejects) — previously a 401/500 here was
+        // silently swallowed and the data was simply never saved. Re-mark the
+        // collections dirty (the autosave net also retries within 2s).
+        Object.keys(toSave).forEach(function (n) { _pendingCollections[n] = true; });
+        if (res && res.status === 401) showRelogin();
+        setStatus("err", "✗ Not saved (server error " + (res ? res.status : "?") + ") — retrying");
+      }).catch(function (e) {
+        Object.keys(toSave).forEach(function (n) { _pendingCollections[n] = true; });
+        setStatus("err", "✗ Not saved (no connection) — retrying");
+        console.error("Save failed:", e);
+      });
     }, 300);
   };
 
@@ -1413,9 +1432,21 @@
     names.forEach(function (name) {
       if (window.BCCWE[name] !== undefined && typeof window.BCCWE[name] !== "function") toSave[name] = window.BCCWE[name];
     });
+    // Hold the autosave net while this save-or-stay transaction is in flight —
+    // otherwise the 2s timer could persist the mutated state, and a failed
+    // persistNow would roll back memory while the DB kept the "failed" write
+    // (phantom records + duplicate numbers on retry).
+    _saveLock++;
     return fetch("/api/save-bulk", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(toSave),
-    }).then(function (r) { return !!(r && r.ok); }).catch(function () { return false; });
+    }).then(function (r) {
+      _saveLock = Math.max(0, _saveLock - 1);
+      if (r && r.status === 401) showRelogin();
+      return !!(r && r.ok);
+    }).catch(function () {
+      _saveLock = Math.max(0, _saveLock - 1);
+      return false;
+    });
   };
 
   // ---- automatic full-state save (safety net) ----
@@ -1424,6 +1455,8 @@
   // Claude Design exports work without per-file changes.
   var _skipKeys = { today: true, blankPerms: true, allPerms: true };
   var _lastSnapshot = "";
+  var _saveLock = 0;    // >0 while a persistNow save-or-stay transaction is in flight
+  var _saving = false;  // a full-state save is already on the wire — don't stack another
 
   function snapshotState() {
     var snap = {};
@@ -1464,8 +1497,73 @@
     }
   }
 
+  // ---- in-place re-login (session recovery WITHOUT losing unsaved work) ----
+  // Sessions live in server memory, and shared hosting (Passenger) restarts the
+  // Node app whenever it idles — so tokens die routinely mid-shift. Every save
+  // then 401s. Previously those 401s were swallowed and the user kept working
+  // against a server that saved NOTHING. This overlay lets them log back in on
+  // the spot; the in-memory data is untouched and is saved immediately after.
+  var _reloginOpen = false;
+  function showRelogin() {
+    if (_reloginOpen) return;
+    _reloginOpen = true;
+    try {
+      var wrap = document.createElement("div");
+      wrap.id = "bccwe-relogin";
+      wrap.style.cssText = "position:fixed;inset:0;background:rgba(15,23,32,.62);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;";
+      var inputCss = "display:block;width:100%;box-sizing:border-box;margin:0 0 8px;padding:10px 12px;border:1px solid #d4dae2;border-radius:8px;font-size:14px;";
+      wrap.innerHTML =
+        '<div style="background:#fff;border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,.35);padding:26px 26px 22px;width:370px;max-width:92vw">' +
+        '<h3 style="margin:0 0 6px;font-size:17px;color:#1c2530">Session expired — log back in</h3>' +
+        '<p style="margin:0 0 14px;font-size:13px;color:#5a6877;line-height:1.5">The server restarted or your login timed out. <strong>Your unsaved work is still on this page</strong> — log back in and it will be saved right away.</p>' +
+        '<input id="bccwe-rl-user" placeholder="User ID or email" style="' + inputCss + '" />' +
+        '<input id="bccwe-rl-pass" type="password" placeholder="Password" style="' + inputCss + '" />' +
+        '<div id="bccwe-rl-err" style="color:#c0392b;font-size:12px;min-height:16px;margin:2px 0 8px"></div>' +
+        '<button id="bccwe-rl-go" style="width:100%;padding:11px 0;border:0;border-radius:9px;background:#ea580c;color:#fff;font-weight:700;font-size:14px;cursor:pointer">Log back in &amp; save</button>' +
+        '</div>';
+      document.body.appendChild(wrap);
+      var u = document.getElementById("bccwe-rl-user");
+      var p = document.getElementById("bccwe-rl-pass");
+      var err = document.getElementById("bccwe-rl-err");
+      var go = document.getElementById("bccwe-rl-go");
+      u.value = (window.__session && (window.__session.userId || "")) || "";
+      function attempt() {
+        err.textContent = ""; go.disabled = true; go.textContent = "Logging in…";
+        fetch("/api/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: u.value.trim(), password: p.value }),
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (res) {
+            if (res.ok && res.j && res.j.ok && res.j.token) {
+              window.__authToken = res.j.token;
+              try { localStorage.setItem("bccwe_token", res.j.token); } catch (e) {}
+              try { wrap.parentNode.removeChild(wrap); } catch (e) {}
+              _reloginOpen = false;
+              _lastSnapshot = "";   // force a full save of everything now
+              autoSave(false);
+            } else {
+              err.textContent = (res.j && res.j.error) || "Wrong ID or password.";
+              go.disabled = false; go.textContent = "Log back in & save";
+            }
+          })
+          .catch(function () {
+            err.textContent = "Can't reach the server — check the connection and try again.";
+            go.disabled = false; go.textContent = "Log back in & save";
+          });
+      }
+      go.onclick = attempt;
+      p.onkeydown = function (e) { if (e.key === "Enter") attempt(); };
+      setTimeout(function () { (u.value ? p : u).focus(); }, 50);
+    } catch (e) { _reloginOpen = false; }
+  }
+
   // Normal save — plain fetch has NO body-size limit (works for any data size).
+  // CRITICAL: _lastSnapshot is only advanced on CONFIRMED success. Previously it
+  // was set before the request, so one failed save marked the state "saved" and
+  // it was never retried — silent, permanent data loss.
   function saveAsync(json) {
+    if (_saving) return;   // one full-state save on the wire at a time
+    _saving = true;
     setStatus("saving", "Saving…");
     fetch("/api/save-bulk", {
       method: "POST",
@@ -1473,27 +1571,37 @@
       body: json,
     })
       .then(function (res) {
-        if (res && res.ok) setStatus("ok", "✓ Saved");
-        else setStatus("err", "✗ Not saved (server error " + (res ? res.status : "?") + ")");
+        _saving = false;
+        if (res && res.ok) { _lastSnapshot = json; setStatus("ok", "✓ Saved"); return; }
+        if (res && res.status === 401) { setStatus("err", "✗ Not saved — session expired"); showRelogin(); return; }
+        if (res && res.status === 413) { setStatus("err", "✗ Not saved — data exceeds the server's size limit"); return; }
+        setStatus("err", "✗ Not saved (server error " + (res ? res.status : "?") + ") — retrying");
       })
       .catch(function () {
-        setStatus("err", "✗ Not saved (no connection to server)");
+        _saving = false;
+        setStatus("err", "✗ Not saved (no connection) — retrying");
       });
   }
 
-  // Final save when the page is closing. sendBeacon/keepalive are capped at
-  // ~64KB, so for larger data we fall back to a synchronous request, which is
-  // reliable during unload and has no size limit.
+  // Final best-effort save when the page is closing. Both paths now carry the
+  // auth token — previously neither did, so EVERY exit save was rejected with
+  // 401 and silently lost. sendBeacon can't set headers, so the token rides as
+  // a query parameter (the server accepts ?t= for exactly this reason); the
+  // sync-XHR fallback sets the header. The snapshot is NOT marked saved: if the
+  // page survives (tab re-shown), the 2s net re-verifies with a real save.
   function saveOnExit(json) {
+    var tok = window.__authToken || "";
+    var url = "/api/save-bulk" + (tok ? "?t=" + encodeURIComponent(tok) : "");
     var sent = false;
     if (navigator.sendBeacon && json.length < 60000) {
-      try { sent = navigator.sendBeacon("/api/save-bulk", new Blob([json], { type: "application/json" })); } catch (e) { sent = false; }
+      try { sent = navigator.sendBeacon(url, new Blob([json], { type: "application/json" })); } catch (e) { sent = false; }
     }
     if (!sent) {
       try {
         var x = new XMLHttpRequest();
-        x.open("POST", "/api/save-bulk", false); // synchronous = reliable on exit
+        x.open("POST", url, false); // synchronous = reliable on exit
         x.setRequestHeader("Content-Type", "application/json");
+        if (tok) x.setRequestHeader("x-auth-token", tok);
         x.send(json);
       } catch (e) {}
     }
@@ -1501,19 +1609,22 @@
 
   function autoSave(isExit) {
     if (!window.__dataLoaded) return; // never save until real data is loaded
+    if (!isExit && _saveLock > 0) return; // a save-or-stay transaction is mid-flight
     var json;
     try { json = JSON.stringify(snapshotState()); } catch (e) { return; }
     if (json === _lastSnapshot) return;
-    _lastSnapshot = json;
-    if (isExit) saveOnExit(json);
-    else saveAsync(json);
+    if (isExit) { saveOnExit(json); return; } // best-effort — never marked "saved"
+    saveAsync(json);
   }
 
   try { _lastSnapshot = JSON.stringify(snapshotState()); } catch (e) {}
   // Check often so new invoices/returns are saved within a couple of seconds.
+  // A failed attempt leaves _lastSnapshot behind, so the next tick retries.
   setInterval(function () { autoSave(false); }, 2000);
   document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "hidden") autoSave(true);
+    // Tab hidden (not closing): the page is still alive, so use the normal
+    // async save — it confirms and retries. Exit paths are for real unloads.
+    if (document.visibilityState === "hidden") { autoSave(false); autoSave(true); }
   });
   window.addEventListener("pagehide", function () { autoSave(true); });
   window.addEventListener("beforeunload", function () { autoSave(true); });

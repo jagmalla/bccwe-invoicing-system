@@ -82,22 +82,30 @@ Each item: `[ ]` checkbox · short problem · file(s) · one-line fix.
       screens and run the finance functions on known data, so each later phase is checkable
       without a browser. (Guide §16.8 references this harness.)
 
-### Phase 1 — Stop the bleeding: save reliability & data loss  · CRITICAL
+### Phase 1 — Stop the bleeding: save reliability & data loss  · CRITICAL  *(done)*
 Root cause: saves fail or mislead, and a failed load shows demo data as real.
-- [ ] **Tab-close/hide save is always rejected (401).** `saveOnExit` uses `sendBeacon`/sync-XHR
-      which never send `x-auth-token`; and `autoSave` marks state "saved" *before* the request,
-      so a failure is never retried. `data.js:1457-1470, 1476-1479` → send token (keepalive fetch
-      / token in beacon URL with server support), and only set `_lastSnapshot` on confirmed success.
-- [ ] **`persist()`/autoSave swallow HTTP errors.** A 401/500 resolves the promise; nothing checks
-      `res.ok`, retries, or forces re-login. `data.js:1355-1369` → check `res.ok`, surface failures,
-      re-auth on 401.
-- [ ] **Failed `GET /api/state` silently boots the seeded demo books.** `data.js:1329-1345` +
-      `app.jsx:266-269` → on non-200, render a hard "cannot load your data" screen; never render `<App/>`.
-- [ ] **One corrupt collection bricks the whole load.** `getAllState()` parses every row with no
-      try/catch. `server.js:135-142` → per-row try/catch, skip+log the bad blob.
-- [ ] **10 MB body limit vs. whole-state saves.** `server.js:15` → raise deliberately and/or move
-      toward per-collection saves; surface a hard error when a save is rejected.
-- **Verify:** simulate 401 and 500, hide the tab mid-edit → confirm no silent loss and a visible error.
+- [x] **Tab-close/hide save was always rejected (401).** `data.js` → both exit paths now carry the
+      session token (`?t=` on the beacon — server accepts it in `requireAuth`; header on the sync-XHR),
+      and `_lastSnapshot` advances ONLY on confirmed success, so a failed attempt is retried by the 2s
+      net. Tab-hide now also fires the normal confirming async save. *(done — verified in harness.)*
+- [x] **`persist()`/autoSave swallowed HTTP errors.** `data.js` → all paths check `res.ok`; failures
+      re-mark collections dirty, show the red badge, and retry; **401 opens an in-place re-login
+      overlay** that restores the session *without a reload*, keeping unsaved work, then saves it
+      immediately. This is the fix for Passenger idle-restarts killing sessions mid-shift. *(done —
+      harness: failed save retries next tick; confirmed save stops; 401 opens overlay.)*
+- [x] **Failed `GET /api/state` silently booted the demo books.** `data.js` sets `__loadFailed`;
+      `app.jsx` renders a hard "Can't load your data" screen with retry — the app never shows seed
+      data as real, and saving stays disabled so nothing can overwrite the DB. *(done)*
+- [x] **One corrupt collection bricked the whole load.** `server.js` → per-row try/catch; the bad
+      blob is skipped and logged, everything else loads. *(done)*
+- [x] **10 MB body limit vs. whole-state saves.** `server.js` → raised to 25 MB; the client now shows
+      a specific "data exceeds the server's size limit" error on 413 instead of failing quietly.
+      *(done — per-collection saves come with Phase 2.)*
+- [x] **`persistNow` raced the 2s autosave** (was listed under Phase 2) → the autosave net is
+      suspended while a save-or-stay transaction is in flight. *(done — harness-verified.)*
+- **Verify:** harness executed the REAL `data.js` in a stubbed browser: fail→retry, success→stop,
+      change→one save, 401→overlay, persistNow lock — all pass. **Browser test recommended:** stop the
+      Node app mid-edit → red badge appears; start it → relogin overlay → work saved.
 
 ### Phase 2 — Numbering & concurrency  · CRITICAL/HIGH *(depth depends on usage-model answer)*
 Root cause: numbers allocated in-memory + full-state last-writer-wins.

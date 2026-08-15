@@ -12,7 +12,9 @@ const PORT = process.env.PORT || 3000;
 // X-Forwarded-For; trusting the proxy makes req.ip return it.
 app.set("trust proxy", true);
 
-app.use(express.json({ limit: "10mb" }));
+// 25mb: saves post the whole dataset; hitting the cap must be loud, not silent.
+// The client shows "data exceeds the server's size limit" on a 413.
+app.use(express.json({ limit: "25mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 /*
@@ -122,7 +124,9 @@ function validToken(token) {
   return true;
 }
 function requireAuth(req, res, next) {
-  const token = req.headers["x-auth-token"] || "";
+  // The tab-close save uses navigator.sendBeacon, which cannot set headers —
+  // it carries the same session token as a ?t= query parameter instead.
+  const token = req.headers["x-auth-token"] || (req.query && req.query.t) || "";
   if (validToken(token)) return next();
   res.status(401).json({ error: "auth_required" });
 }
@@ -138,7 +142,13 @@ async function getAllState() {
   const [rows] = await pool.query("SELECT name, data FROM collections");
   const state = {};
   for (const row of rows) {
-    state[row.name] = JSON.parse(row.data);
+    // One corrupt/truncated blob must not brick the ENTIRE app load — skip the
+    // bad collection (logged loudly) and serve everything else.
+    try {
+      state[row.name] = JSON.parse(row.data);
+    } catch (e) {
+      console.error("Skipping corrupt collection '" + row.name + "': " + e.message);
+    }
   }
   return state;
 }
