@@ -47,6 +47,10 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
   );
   const [payAmt, setPayAmt] = useState(edit ? (edit.paid || 0) : 0);
   const [payMethod, setPayMethod] = useState(edit ? (edit.payMethod || "E-Transfer") : "E-Transfer");
+  const [poNo, setPoNo] = useState(edit ? (edit.poNo || "") : "");
+  const [attachments, setAttachments] = useState(edit && Array.isArray(edit.attachments) ? edit.attachments.slice() : []);
+  const [attachBusy, setAttachBusy] = useState(false);
+  const attachRef = useRef(null);
   const [showPreview, setShowPreview] = useState(false);
   const [showEmail, setShowEmail] = useState(false);
   const [showAddClient, setShowAddClient] = useState(false);
@@ -223,6 +227,7 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
       // Persist the invoice-level discount so editing restores it (previously it
       // reset to zero on edit, silently re-inflating the total on the next save).
       discMode, discVal: Number(discVal) || 0, discTiming, invDisc: calc.invDisc,
+      poNo: poNo.trim(), attachments,
       paid: Number(payAmt) || 0, refunded: edit ? (edit.refunded || 0) : refund, status, notes, payMethod,
       lines: lines.map((l) => ({ desc: l.desc, code: l.code, qty: l.qty, price: l.price, disc: l.disc, cost: l.cost })),
       charges: charges.map((c) => ({ id: c.id, label: c.label, amount: Number(c.amount) || 0, taxable: !!c.taxable })),
@@ -344,6 +349,9 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
               <Field label="Invoice #" hint="Auto-allocated — override allowed">
                 <input value={invNo} readOnly={!!edit} title={edit ? "The invoice number can't be changed when editing" : undefined} onChange={(e) => { if (edit) return; setInvNo(e.target.value); setInvNoTouched(true); }} />
               </Field>
+              <Field label="P.O./S.O. #" hint="Customer purchase/sales order reference (optional)">
+                <input value={poNo} onChange={(e) => setPoNo(e.target.value)} placeholder="e.g. PO-4521" />
+              </Field>
               <Field label="Invoice date">
                 <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
               </Field>
@@ -359,6 +367,35 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
             {client && client.exempt && (
               <div className="inline-note"><Icon name="alert" size={15} /> This client is flagged <strong>tax-exempt</strong> — tax mode pre-set to “No Tax”. Override per line below if needed.</div>
             )}
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line, #e6eaf0)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <span className="field-label" style={{ margin: 0 }}>Attachments <span className="muted" style={{ fontWeight: 400 }}>· archived copy of the source invoice (PDF/image, max 5 MB each)</span></span>
+                <input ref={attachRef} type="file" hidden multiple accept=".pdf,image/*"
+                  onChange={async (e) => {
+                    const files = Array.from(e.target.files || []);
+                    e.target.value = "";
+                    if (!files.length) return;
+                    setAttachBusy(true);
+                    for (const f of files) {
+                      try { const a = await window.uploadInvoiceAttachment(f); setAttachments((ls) => [...ls, a]); }
+                      catch (err) { pushToast && pushToast("Attach failed — " + (err.message || f.name)); }
+                    }
+                    setAttachBusy(false);
+                  }} />
+                <Btn variant="ghost" size="sm" icon="plus" disabled={attachBusy} onClick={() => attachRef.current && attachRef.current.click()}>{attachBusy ? "Uploading…" : "Attach file"}</Btn>
+              </div>
+              {attachments.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                  {attachments.map((a, i) => (
+                    <span key={a.id || i} className="cat-tag" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 8px" }}>
+                      <button type="button" className="link" title="Download" onClick={() => window.downloadAttachmentFile(a, pushToast)}>{a.name}</button>
+                      <button type="button" className="icon-btn" style={{ width: 18, height: 18 }} title="Remove from invoice"
+                        onClick={() => setAttachments((ls) => ls.filter((x) => x !== a))}><Icon name="x" size={12} /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           </Card>
 
           <Card title="Line items" pad={false}
@@ -660,7 +697,7 @@ function InvoiceGenerator({ onSaved, pushToast, editNo, defaultStore }) {
         </aside>
       </div>
 
-      {showPreview && <InvoicePreview {...{ invNo, date, due, client, lines, calc, taxMode, discMode, discVal, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company: storeObj, onEmail: () => { setShowPreview(false); setShowEmail(true); }, onClose: () => setShowPreview(false) }} />}
+      {showPreview && <InvoicePreview {...{ invNo, poNo, date, due, client, lines, calc, taxMode, discMode, discVal, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company: storeObj, onEmail: () => { setShowPreview(false); setShowEmail(true); }, onClose: () => setShowPreview(false) }} />}
       {showEmail && <EmailModal client={client} invNo={invNo} total={calc.total}
         invData={{ no: invNo, companyId, clientId, date, due, status, subtotal: calc.subtotal, gst: calc.gst, pst: calc.pst, total: calc.total, paid: Number(payAmt) || 0, invDisc: calc.invDisc, discTiming, lines: lines.map((l) => ({ desc: l.desc, code: l.code, qty: l.qty, price: l.price, disc: l.disc, cost: l.cost })) }}
         onClose={() => setShowEmail(false)} pushToast={pushToast} />}
@@ -858,7 +895,7 @@ function Row({ k, v, muted, bold, pos }) {
   );
 }
 
-function InvoicePreview({ invNo, date, due, client, lines, calc, taxMode, discMode, discVal, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company, onEmail, onClose }) {
+function InvoicePreview({ invNo, poNo, date, due, client, lines, calc, taxMode, discMode, discVal, notes, payAmt, balance, refund, credit, status, lineTotal, salesId, company, onEmail, onClose }) {
   const C = company || BCCWE.company;
   const on = (k) => (C.show ? C.show[k] !== false : true);
   const m = BCCWE.TAX.modes[taxMode];
@@ -887,6 +924,7 @@ function InvoicePreview({ invNo, date, due, client, lines, calc, taxMode, discMo
             <table>
               <tbody>
                 <tr><td>Invoice #</td><th>{invNo}</th></tr>
+                {poNo ? <tr><td>P.O./S.O. #</td><th>{poNo}</th></tr> : null}
                 <tr><td>Date</td><th>{shortDate(date)}</th></tr>
                 <tr><td>Due</td><th>{shortDate(due)}</th></tr>
                 <tr><td>Status</td><th><Badge tone={statusTone(status)}>{status}</Badge></th></tr>

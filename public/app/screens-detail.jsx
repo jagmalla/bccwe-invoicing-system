@@ -326,6 +326,7 @@ function InvoiceDetail({ no, go, pushToast }) {
                 <h2>{inv.kind === "order" ? "ORDER INVOICE" : "INVOICE"}</h2>
                 <table><tbody>
                   <tr><td>Invoice #</td><th>{inv.no}</th></tr>
+                  {inv.poNo ? <tr><td>P.O./S.O. #</td><th>{inv.poNo}</th></tr> : null}
                   <tr><td>Date</td><th>{shortDate(inv.date)}</th></tr>
                   <tr><td>Due</td><th>{shortDate(inv.due)}</th></tr>
                   <tr><td>Status</td><th><Badge tone={statusTone(status)}>{status}</Badge></th></tr>
@@ -469,6 +470,17 @@ function InvoiceDetail({ no, go, pushToast }) {
       {emailOpen && <EmailModal client={client} invNo={inv.no} total={inv.total} onClose={() => setEmailOpen(false)} pushToast={pushToast} />}
       {returnOpen && <InvoiceReturnModal inv={inv} onClose={() => setReturnOpen(false)} onSubmit={recordReturn} />}
 
+      {Array.isArray(inv.attachments) && inv.attachments.length > 0 && (
+        <Card title="Attached files" sub={inv.attachments.length + " archived cop" + (inv.attachments.length === 1 ? "y" : "ies") + " of the source invoice"}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {inv.attachments.map((a, i) => (
+              <Btn key={a.id || i} variant="ghost" size="sm" icon="download" onClick={() => window.downloadAttachmentFile(a, pushToast)}>
+                {a.name || a.id}{a.size ? " (" + Math.round(a.size / 1024) + " KB)" : ""}
+              </Btn>
+            ))}
+          </div>
+        </Card>
+      )}
       <EmailLogCard filter={(m) => m.docNo === inv.no} emptyText={"Invoice " + inv.no + " has not been emailed yet"} />
       <DownloadLogCard filter={(d) => d.docNo === inv.no} emptyText={"No downloads of " + inv.no + " yet"} />
     </div>

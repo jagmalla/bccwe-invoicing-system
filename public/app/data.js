@@ -713,7 +713,10 @@
     doc.text("INVOICE", W - 40, 52, { align: "right" });
     doc.setFontSize(9); doc.setFont("helvetica", "normal");
     var ry = 74;
-    [["Invoice #", inv.no], ["Date", inv.date], ["Due", inv.due], ["Status", inv.status]].forEach(function (r) {
+    var metaRows = [["Invoice #", inv.no]];
+    if (inv.poNo) metaRows.push(["P.O./S.O. #", inv.poNo]);
+    metaRows.push(["Date", inv.date], ["Due", inv.due], ["Status", inv.status]);
+    metaRows.forEach(function (r) {
       doc.setTextColor(130); doc.text(String(r[0]), W - 170, ry);
       doc.setTextColor(20); doc.text(String(r[1] == null ? "" : r[1]), W - 40, ry, { align: "right" });
       ry += 14;

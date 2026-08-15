@@ -375,6 +375,13 @@ function Toast({ msg, onDone }) {
 
 /* ---------- CSV parsing + import modal ---------- */
 function parseCsvGrid(text) {
+  // Excel saves CSV with a UTF-8 BOM — strip it, or the first header cell
+  // becomes "﻿code" and every import fails with "No rows found".
+  text = String(text).replace(/^\uFEFF/, "");
+  // Tab-separated files (.tsv / Excel "Text (tab delimited)") use tabs, not
+  // commas — detect from the first line so they parse into real columns.
+  const firstLine = text.slice(0, text.indexOf("\n") < 0 ? text.length : text.indexOf("\n"));
+  const sep = (firstLine.split("\t").length > firstLine.split(",").length) ? "\t" : ",";
   const rows = []; let row = []; let cur = ""; let inQ = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -382,7 +389,7 @@ function parseCsvGrid(text) {
       if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
       else cur += ch;
     } else if (ch === '"') { inQ = true; }
-    else if (ch === ",") { row.push(cur); cur = ""; }
+    else if (ch === sep) { row.push(cur); cur = ""; }
     else if (ch === "\n") { row.push(cur); rows.push(row); row = []; cur = ""; }
     else if (ch !== "\r") { cur += ch; }
   }
@@ -411,12 +418,20 @@ function gridToObjects(grid, columns) {
   }).filter((o) => columns.some((c) => c.required && o[c.key]));
 }
 
-function ImportModal({ title, entityFile, columns, sample, onImport, onClose, pushToast }) {
+// Optional prop `analyze(rows)` → { summary: [..lines], warnings: [..lines], block: bool,
+// importLabel: "Import 3 invoices (12 lines)" } — used by imports that need a
+// pre-commit preview (grouping counts, unmatched names, duplicates).
+// `onImport(rows, analysis)` may return: a number ("N rows imported" toast),
+// a string (toasted verbatim), a Promise of either, or false (stay open — the
+// import failed and already toasted its own error).
+function ImportModal({ title, entityFile, columns, sample, analyze, onImport, onClose, pushToast }) {
   const [fileName, setFileName] = useState("");
   const [parsed, setParsed] = useState(null);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
+  const analysis = useMemo(() => (parsed && analyze ? analyze(parsed) : null), [parsed]);
 
   function downloadTemplate() {
     exportXlsx(entityFile + "-import-template", "Template",
@@ -449,9 +464,21 @@ function ImportModal({ title, entityFile, columns, sample, onImport, onClose, pu
     <Modal title={title} onClose={onClose}
       footer={<>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn variant="primary" icon="check" disabled={!parsed || !parsed.length}
-          onClick={() => { const n = onImport(parsed); pushToast && pushToast(n + " " + (n === 1 ? "row" : "rows") + " imported"); onClose(); }}>
-          {parsed ? "Import " + parsed.length + " " + (parsed.length === 1 ? "row" : "rows") : "Import"}
+        <Btn variant="primary" icon="check" disabled={!parsed || !parsed.length || busy || (analysis && analysis.block)}
+          onClick={() => {
+            if (busy) return;
+            setBusy(true);
+            Promise.resolve(onImport(parsed, analysis)).then((r) => {
+              setBusy(false);
+              if (r === false) return; // import failed — its own toast explains; stay open
+              if (typeof r === "string") pushToast && pushToast(r);
+              else pushToast && pushToast(r + " " + (r === 1 ? "row" : "rows") + " imported");
+              onClose();
+            }).catch(() => { setBusy(false); pushToast && pushToast("Import failed — nothing was changed."); });
+          }}>
+          {busy ? "Importing…"
+            : analysis && analysis.importLabel ? analysis.importLabel
+            : parsed ? "Import " + parsed.length + " " + (parsed.length === 1 ? "row" : "rows") : "Import"}
         </Btn>
       </>}>
       <p className="import-lead">Upload a <strong>.csv</strong> file. The first row must be a header with these columns — download the sample template to see the exact format.</p>
@@ -475,6 +502,16 @@ function ImportModal({ title, entityFile, columns, sample, onImport, onClose, pu
         <span className="id-sub">.csv · first row = header</span>
       </label>
       {error && <div className="inline-note"><Icon name="alert" size={15} />{error}</div>}
+      {analysis && analysis.summary && analysis.summary.length > 0 && (
+        <div className="import-preview" style={{ marginBottom: 10 }}>
+          {analysis.summary.map((s, i) => (
+            <div className="ip-prev-head" key={i}><Icon name="check" size={15} /> <span>{s}</span></div>
+          ))}
+        </div>
+      )}
+      {analysis && analysis.warnings && analysis.warnings.map((w, i) => (
+        <div className="inline-note" key={"w" + i}><Icon name="alert" size={15} />{w}</div>
+      ))}
       {parsed && parsed.length > 0 && (
         <div className="import-preview">
           <div className="ip-prev-head"><Icon name="check" size={15} /> Parsed <strong>{parsed.length}</strong> {parsed.length === 1 ? "row" : "rows"} — preview</div>
@@ -493,9 +530,49 @@ function ImportModal({ title, entityFile, columns, sample, onImport, onClose, pu
   );
 }
 
+/* ---------- invoice file attachments (stored server-side in uploads/) ---------- */
+// Upload one file → resolves { id, name, size } to store on the invoice record.
+// Files are kept on the server's disk, NOT in the database JSON, so attachments
+// never bloat the state saves. 5 MB per-file cap (server enforces it too).
+function uploadInvoiceAttachment(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) return reject(new Error("No file"));
+    if (file.size > 5 * 1024 * 1024) return reject(new Error(file.name + " is over the 5 MB limit"));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read " + file.name));
+    reader.onload = () => {
+      const uri = String(reader.result);
+      const b64 = uri.slice(uri.indexOf("base64,") + 7);
+      fetch("/api/upload-attachment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: file.name, data: b64 }),
+      }).then((r) => r.json()).then((j) => {
+        if (j && j.ok) resolve({ id: j.id, name: file.name, size: file.size });
+        else reject(new Error((j && j.error) || "Upload failed"));
+      }).catch(reject);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+// Download an attachment via authenticated fetch (a plain <a href> link can't
+// send the x-auth-token header, so we fetch the blob and save it).
+function downloadAttachmentFile(att, pushToast) {
+  fetch("/api/attachment/" + encodeURIComponent(att.id))
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+    .then((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = att.name || att.id;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    })
+    .catch(() => { pushToast && pushToast("Could not download " + (att.name || "attachment")); });
+}
+
 Object.assign(window, {
   fmt, fmtPlain, shortDate, clientName, personName, supplierName, supplierIdByName,
   Icon, Badge, statusTone, Btn, Field, Card, PageHead, Modal, Empty, Toast, ImportModal,
+  uploadInvoiceAttachment, downloadAttachmentFile,
   applySort, SortControl, periodRange, inRange, itemByCode, PeriodFilter, timeBuckets, ProfitTrendChart,
   defaultTaxForType, taxComponents, taxRateOf, taxPostings,
   saleKindLabel,

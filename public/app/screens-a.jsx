@@ -179,6 +179,139 @@ function Dashboard({ go, store }) {
   );
 }
 
+/* ---------------- Invoice History CSV import ----------------
+   One CSV row per LINE ITEM; rows sharing the same Invoice # (+ same Date and
+   Client) are grouped into a single invoice. Historical numbers are kept as-is
+   (never re-numbered). Stock is NOT changed — these are past sales the current
+   stock already reflects. Pure function, so it can be unit-tested. */
+const INVOICE_IMPORT_COLUMNS = [
+  { key: "no", label: "Invoice #", required: true, hint: "Your historical number — kept as-is" },
+  { key: "date", label: "Invoice Date", required: true, hint: "YYYY-MM-DD" },
+  { key: "due", label: "Due Date", hint: "Blank = from client's terms" },
+  { key: "client", label: "Client Name", required: true, hint: "Matched by name (case-insensitive)" },
+  { key: "item", label: "Item Code or Description", required: true, hint: "SKU/code match, else freeform line" },
+  { key: "qty", label: "Quantity", required: true },
+  { key: "price", label: "Unit Price", required: true },
+  { key: "disc", label: "Discount %", hint: "Default 0" },
+  { key: "taxpc", label: "Tax Treatment", hint: "0 / 5 / 7 / 12 — blank = client default" },
+  { key: "status", label: "Status", hint: "Paid / Unpaid / Partially Paid" },
+  { key: "paid", label: "Amount Paid", hint: "For partially paid invoices" },
+  { key: "paydate", label: "Payment Date", hint: "YYYY-MM-DD — so history isn't 'overdue'" },
+  { key: "pono", label: "PO/SO #" },
+  { key: "notes", label: "Notes" },
+];
+function buildInvoiceImport(objs, companyId) {
+  const D = BCCWE;
+  const norm = (s) => String(s == null ? "" : s).trim();
+  const lc = (s) => norm(s).toLowerCase();
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const normDate = (s) => {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(norm(s));
+    if (!m) return "";
+    const p = (x) => (x.length < 2 ? "0" + x : x);
+    return m[1] + "-" + p(m[2]) + "-" + p(m[3]);
+  };
+  // "" → null (use default) · valid → mode string · anything else → undefined (error)
+  const taxFromPc = (v) => {
+    const t = lc(v);
+    if (t === "") return null;
+    if (t === "0" || t === "none" || t === "no tax") return "none";
+    if (t === "5" || t === "gst") return "gst";
+    if (t === "7" || t === "pst") return "pst";
+    if (t === "12" || t === "both" || t === "gst+pst") return "both";
+    return undefined;
+  };
+  const existingNos = new Set((D.invoices || []).map((i) => lc(i.no)));
+  const clientsByName = {}; (D.clients || []).forEach((c) => { clientsByName[lc(c.name)] = c; });
+  const itemsByCode = {}, itemsByName = {};
+  (D.inventory || []).forEach((it) => { itemsByCode[lc(it.code)] = it; itemsByName[lc(it.name)] = it; });
+  (D.services || []).forEach((s) => { if (!itemsByCode[lc(s.code)]) itemsByCode[lc(s.code)] = s; });
+
+  const badRows = [], dupExisting = new Set(), conflictNos = new Set();
+  const groups = new Map(); // lc(no) -> { no, date, clientName, rows[] }
+  objs.forEach((o, i) => {
+    const rowNo = i + 2; // +1 header, +1 one-based
+    const no = norm(o.no), date = normDate(o.date), clientN = norm(o.client);
+    const qty = parseFloat(o.qty), price = parseFloat(o.price);
+    if (!no) { badRows.push("Row " + rowNo + ": missing Invoice #"); return; }
+    if (!date) { badRows.push("Row " + rowNo + ": Invoice Date must be YYYY-MM-DD"); return; }
+    if (!clientN) { badRows.push("Row " + rowNo + ": missing Client Name"); return; }
+    if (!norm(o.item)) { badRows.push("Row " + rowNo + ": missing Item Code or Description"); return; }
+    if (!(qty > 0)) { badRows.push("Row " + rowNo + ": Quantity must be a number above 0"); return; }
+    if (isNaN(price) || price < 0) { badRows.push("Row " + rowNo + ": Unit Price must be a number"); return; }
+    if (taxFromPc(o.taxpc) === undefined) { badRows.push("Row " + rowNo + ": Tax Treatment must be 0, 5, 7 or 12"); return; }
+    if (existingNos.has(lc(no))) { dupExisting.add(no); return; }
+    let g = groups.get(lc(no));
+    if (!g) { groups.set(lc(no), { no, date, clientName: clientN, rows: [o] }); return; }
+    if (g.date !== date || lc(g.clientName) !== lc(clientN)) { conflictNos.add(no); return; }
+    g.rows.push(o);
+  });
+  conflictNos.forEach((no) => groups.delete(lc(no)));
+
+  const newClients = [];
+  const clientFor = (name) => {
+    const c = clientsByName[lc(name)];
+    if (c) return c;
+    let n = newClients.find((x) => lc(x.name) === lc(name));
+    if (!n) {
+      n = { id: "c_imp" + Date.now().toString(36) + "_" + newClients.length, name, type: "Retail",
+        contact: "—", phone: "—", terms: "Due on receipt", emails: [], defaultEmail: "",
+        exempt: false, balance: 0, taxDefault: (typeof defaultTaxForType === "function" ? defaultTaxForType("Retail") : "both") };
+      newClients.push(n);
+    }
+    return n;
+  };
+
+  const unmatchedItems = new Set();
+  const invoices = [], payments = [], itemSales = [];
+  let lineCount = 0;
+  const sorted = [...groups.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+  sorted.forEach((g, gi) => {
+    const client = clientFor(g.clientName);
+    let mode = null;
+    g.rows.forEach((r) => { if (!mode) { const t = taxFromPc(r.taxpc); if (t) mode = t; } });
+    if (!mode) mode = client.exempt ? "none" : (client.taxDefault || "both");
+    const m = (D.TAX && D.TAX.modes && D.TAX.modes[mode]) || { gst: 0, pst: 0 };
+    const lines = g.rows.map((r) => {
+      const it = itemsByCode[lc(r.item)] || itemsByName[lc(r.item)] || null;
+      if (!it) unmatchedItems.add(norm(r.item));
+      return { code: it ? it.code : "", desc: it ? it.name : norm(r.item),
+        qty: parseFloat(r.qty), price: round2(parseFloat(r.price)), disc: parseFloat(r.disc) || 0, cost: it ? (it.cost || 0) : 0 };
+    });
+    lineCount += lines.length;
+    const subtotal = round2(lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc || 0) / 100), 0));
+    const gst = round2(subtotal * (m.gst || 0));
+    const pst = round2(subtotal * (m.pst || 0));
+    const total = round2(subtotal + gst + pst);
+    const stRaw = lc(g.rows.map((r) => norm(r.status)).find(Boolean) || "");
+    const paidRaw = g.rows.map((r) => norm(r.paid)).find(Boolean);
+    let paid = paidRaw ? round2(parseFloat(paidRaw) || 0) : (stRaw === "paid" ? total : 0);
+    paid = Math.min(Math.max(0, paid), total);
+    const status = total > 0 && paid >= total - 0.005 ? "Paid" : paid > 0.005 ? "Partially Paid" : "Unpaid";
+    let due = normDate(g.rows.map((r) => norm(r.due)).find(Boolean) || "");
+    if (!due) {
+      const nm = /Net\s+(\d+)/i.exec(client.terms || "");
+      const d = new Date(g.date + "T00:00:00"); d.setDate(d.getDate() + (nm ? parseInt(nm[1], 10) : 0));
+      due = d.toISOString().slice(0, 10);
+    }
+    const inv = { no: g.no, companyId: companyId || "", clientId: client.id, date: g.date, due,
+      terms: client.terms || "Due on receipt", kind: "sale", sales: "", tax: mode,
+      subtotal, gst, pst, total, paid, refunded: 0, status,
+      notes: g.rows.map((r) => norm(r.notes)).find(Boolean) || "",
+      poNo: g.rows.map((r) => norm(r.pono)).find(Boolean) || "",
+      payMethod: "Import", imported: true, lines };
+    invoices.push(inv);
+    if (paid > 0.005) {
+      const payDate = normDate(g.rows.map((r) => norm(r.paydate)).find(Boolean) || "") || g.date;
+      payments.push({ id: "p_imp" + Date.now().toString(36) + "_" + gi, date: payDate, inv: g.no, clientId: client.id, amount: paid, method: "Historical import", acct: "1010" });
+    }
+    lines.forEach((l) => { if (l.code && itemsByCode[lc(l.code)] && (D.inventory || []).some((x) => x.code === l.code)) itemSales.push({ date: g.date, code: l.code, clientId: client.id, qty: l.qty, price: l.price, disc: l.disc || 0 }); });
+  });
+
+  return { invoices, newClients, payments, itemSales, lineCount,
+    badRows, dupExisting: [...dupExisting], conflictNos: [...conflictNos], unmatchedItems: [...unmatchedItems] };
+}
+
 /* ---------------- Invoice History ---------------- */
 function InvoiceHistory({ go, pushToast, store }) {
   const D = BCCWE;
@@ -203,8 +336,55 @@ function InvoiceHistory({ go, pushToast, store }) {
   const [to, setTo] = useState(D.today);
   const [showEmail, setShowEmail] = useState(false);
   const [emailInv, setEmailInv] = useState(null);
+  const [showImport, setShowImport] = useState(false);
   const range = periodRange(period, from, to);
   const PER = 8;
+
+  // Store the imported invoices belong to: the active store filter, or the default.
+  const importCompanyId = () => (sf !== "all" ? sf : (window.STORES ? window.STORES.defaultId() : ""));
+  const invoiceImport = {
+    title: "Import invoices (CSV)",
+    entityFile: "BCCWE-invoices",
+    columns: INVOICE_IMPORT_COLUMNS,
+    sample: [
+      { no: "INV-901", date: "2026-05-01", due: "2026-05-31", client: "Example Retail Co.", item: "SCRN-IP13", qty: "1", price: "149.00", disc: "0", taxpc: "12", status: "Paid", paid: "211.68", paydate: "2026-05-03", pono: "PO-1001", notes: "Historical import" },
+      { no: "INV-901", date: "2026-05-01", due: "", client: "Example Retail Co.", item: "Screen install labour", qty: "1", price: "40.00", disc: "0", taxpc: "", status: "", paid: "", paydate: "", pono: "", notes: "" },
+      { no: "INV-902", date: "2026-05-05", due: "", client: "Example Wholesale Ltd.", item: "BAT-IP12", qty: "4", price: "55.00", disc: "10", taxpc: "5", status: "Unpaid", paid: "", paydate: "", pono: "", notes: "" },
+    ],
+    analyze: (rows) => {
+      const b = buildInvoiceImport(rows, importCompanyId());
+      const list = (a, n) => a.slice(0, n).join(", ") + (a.length > n ? " +" + (a.length - n) + " more" : "");
+      const summary = [b.invoices.length + " invoice" + (b.invoices.length === 1 ? "" : "s") + " · " + b.lineCount + " line item" + (b.lineCount === 1 ? "" : "s") + " ready to import (stock is not changed for historical invoices)"];
+      if (b.newClients.length) summary.push(b.newClients.length + " new client" + (b.newClients.length === 1 ? "" : "s") + " will be created: " + list(b.newClients.map((c) => c.name), 5));
+      if (b.unmatchedItems.length) summary.push(b.unmatchedItems.length + " item(s) not found in inventory — imported as description-only lines: " + list(b.unmatchedItems, 5));
+      const warnings = [];
+      if (b.dupExisting.length) warnings.push("Skipped — invoice # already exists in the system: " + list(b.dupExisting, 6));
+      if (b.conflictNos.length) warnings.push("Skipped — same Invoice # used with a different Date/Client in the file: " + list(b.conflictNos, 6));
+      if (b.badRows.length) warnings.push(b.badRows.slice(0, 4).join(" · ") + (b.badRows.length > 4 ? " · +" + (b.badRows.length - 4) + " more rows with problems" : ""));
+      return { summary, warnings, block: b.invoices.length === 0,
+        importLabel: b.invoices.length ? "Import " + b.invoices.length + " invoice" + (b.invoices.length === 1 ? "" : "s") + " (" + b.lineCount + " lines)" : "Nothing to import" };
+    },
+    onImport: async (rows) => {
+      const b = buildInvoiceImport(rows, importCompanyId());
+      if (!b.invoices.length) return false;
+      const snapKeys = ["invoices", "clients", "payments", "itemSales"];
+      const snap = {};
+      try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+      b.newClients.forEach((c) => D.clients.push(c));
+      b.invoices.forEach((inv) => D.invoices.push(inv));
+      b.payments.forEach((p) => D.payments.unshift(p));
+      b.itemSales.forEach((s) => D.itemSales.unshift(s));
+      window.logAudit && window.logAudit("IMPORT", "Invoice", "invoices", "invoices.csv", "Imported " + b.invoices.length + " historical invoices (" + b.lineCount + " lines) from CSV");
+      const ok = window.persistNow ? await window.persistNow("invoices", "clients", "payments", "itemSales") : true;
+      if (!ok) {
+        snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+        pushToast && pushToast("Couldn't save — no connection. Nothing was imported.");
+        return false;
+      }
+      setPage(0);
+      return b.invoices.length + " invoice" + (b.invoices.length === 1 ? "" : "s") + " (" + b.lineCount + " line items) imported" + (b.newClients.length ? " · " + b.newClients.length + " new clients created" : "");
+    },
+  };
 
   const invSorts = {
     date_desc: { label: "Date — newest first", get: (r) => new Date(r.date).getTime(), dir: "desc" },
@@ -262,6 +442,7 @@ function InvoiceHistory({ go, pushToast, store }) {
   function buildExportSpec() {
     const cols = [
       { key: "no", label: "Document #", type: "text" },
+      { key: "pono", label: "P.O./S.O. #", type: "text" },
       { key: "type", label: "Type", type: "text" },
       { key: "client", label: "Client name", type: "text" },
       { key: "date", label: "Date", type: "text" },
@@ -271,6 +452,7 @@ function InvoiceHistory({ go, pushToast, store }) {
     ];
     const data = rows.map((r) => ({
       no: r.doc,
+      pono: r.poNo || "—",
       type: r.txn,
       client: clientName(r.clientId),
       date: shortDate(r.date),
@@ -318,7 +500,7 @@ function InvoiceHistory({ go, pushToast, store }) {
     <div>
       <PageHead title="Invoice History" sub={rows.length + " transactions · " + range.label + " · " + fmt(totals.due) + " outstanding"}
         actions={<>
-          <Btn variant="ghost" icon="download">Import CSV</Btn>
+          <Btn variant="ghost" icon="download" onClick={() => setShowImport(true)}>Import CSV</Btn>
           <Btn variant="ghost" icon="mail" onClick={() => setShowEmail(true)}>Email</Btn>
           <Btn variant="ghost" icon="download" onClick={exportExcel}>Export Excel</Btn>
           <Btn variant="primary" icon="plus" onClick={() => go("invoice")}>New invoice</Btn>
@@ -414,6 +596,9 @@ function InvoiceHistory({ go, pushToast, store }) {
           </div>
         </div>
       </Card>
+      {showImport && (
+        <ImportModal {...invoiceImport} pushToast={pushToast} onClose={() => setShowImport(false)} />
+      )}
       {showEmail && (
         <EmailHistoryModal spec={buildExportSpec()} range={range} go={go}
           onClose={() => setShowEmail(false)} pushToast={pushToast} />
@@ -546,6 +731,19 @@ function People({ go, pushToast }) {
     ? suppliersAll.filter((s) => [s.name, s.contact, s.phone].join(" ").toLowerCase().includes(pqLower))
     : suppliersAll;
 
+  // Dedupe helper shared by both People imports: splits rows into fresh vs.
+  // duplicates (name already in the system, or repeated within the file).
+  const dedupeByName = (objs, existing) => {
+    const have = new Set(existing.map((x) => String(x.name || "").trim().toLowerCase()));
+    const fresh = [], dupes = [];
+    objs.forEach((o) => {
+      const key = String(o.name || "").trim().toLowerCase();
+      if (!key) return;
+      if (have.has(key)) dupes.push(o.name); else { have.add(key); fresh.push(o); }
+    });
+    return { fresh, dupes };
+  };
+  const dupeList = (a) => a.slice(0, 6).join(", ") + (a.length > 6 ? " +" + (a.length - 6) + " more" : "");
   const clientImport = {
     title: "Import clients",
     entityFile: "BCCWE-clients",
@@ -555,15 +753,28 @@ function People({ go, pushToast }) {
       { key: "contact", label: "Contact" },
       { key: "phone", label: "Phone" },
       { key: "email", label: "Email" },
+      { key: "taxNumber", label: "Tax Number", hint: "Client's GST/PST #" },
       { key: "terms", label: "Terms", hint: "e.g. Net 30" },
       { key: "exempt", label: "Tax-exempt", hint: "Yes / No" },
     ],
     sample: [
-      { name: "Example Retail Co.", type: "Retail", contact: "Jane Doe", phone: "(604) 555-0000", email: "jane@example.com", terms: "Due on receipt", exempt: "No" },
-      { name: "Example Wholesale Ltd.", type: "Wholesale", contact: "John Smith", phone: "(778) 555-0001", email: "ap@examplewholesale.com", terms: "Net 30", exempt: "Yes" },
+      { name: "Example Retail Co.", type: "Retail", contact: "Jane Doe", phone: "(604) 555-0000", email: "jane@example.com", taxNumber: "", terms: "Due on receipt", exempt: "No" },
+      { name: "Example Wholesale Ltd.", type: "Wholesale", contact: "John Smith", phone: "(778) 555-0001", email: "ap@examplewholesale.com", taxNumber: "GST 12345 6789", terms: "Net 30", exempt: "Yes" },
     ],
-    onImport: (objs) => {
-      objs.forEach((o, i) => {
+    analyze: (objs) => {
+      const { fresh, dupes } = dedupeByName(objs, D.clients);
+      return {
+        summary: [fresh.length + " new client" + (fresh.length === 1 ? "" : "s") + " ready to import"],
+        warnings: dupes.length ? ["Skipped as likely duplicates (a client with this name already exists): " + dupeList(dupes)] : [],
+        block: fresh.length === 0,
+        importLabel: fresh.length ? "Import " + fresh.length + " client" + (fresh.length === 1 ? "" : "s") : "Nothing new to import",
+      };
+    },
+    onImport: async (objs) => {
+      const { fresh, dupes } = dedupeByName(objs, D.clients);
+      if (!fresh.length) return false;
+      const snap = JSON.parse(JSON.stringify(D.clients || []));
+      fresh.forEach((o, i) => {
         const exempt = /^(y|yes|true|1)/i.test(o.exempt || "");
         const ctype = /whole/i.test(o.type || "") ? "Wholesale" : "Retail";
         D.clients.push({
@@ -572,12 +783,15 @@ function People({ go, pushToast }) {
           contact: o.contact || "—", phone: o.phone || "—",
           terms: o.terms || (ctype === "Wholesale" ? "Net 30" : "Due on receipt"),
           emails: o.email ? [o.email] : [], defaultEmail: o.email || "",
+          taxNumber: o.taxNumber || "",
           exempt, balance: 0, taxDefault: exempt ? "none" : defaultTaxForType(ctype),
         });
       });
+      window.logAudit("IMPORT", "Client", "clients", "clients.csv", "Imported " + fresh.length + " clients from CSV" + (dupes.length ? " (" + dupes.length + " duplicates skipped)" : ""));
+      const ok = window.persistNow ? await window.persistNow("clients") : true;
+      if (!ok) { D.clients = snap; pushToast && pushToast("Couldn't save — no connection. Nothing was imported."); return false; }
       setRev((r) => r + 1);
-      window.logAudit("IMPORT", "Client", "clients", "clients.csv", "Imported " + objs.length + " clients from CSV");
-      return objs.length;
+      return fresh.length + " client" + (fresh.length === 1 ? "" : "s") + " imported" + (dupes.length ? " · " + dupes.length + " duplicate" + (dupes.length === 1 ? "" : "s") + " skipped" : "");
     },
   };
   const supplierImport = {
@@ -594,17 +808,31 @@ function People({ go, pushToast }) {
       { name: "Example Parts Supply", contact: "Sales Desk", phone: "(604) 555-0200", addr: "100 Industrial Ave, Surrey BC", terms: "Net 30" },
       { name: "Example Components Inc.", contact: "Alex Lee", phone: "(778) 555-0222", addr: "500 Boundary Rd, Burnaby BC", terms: "COD" },
     ],
-    onImport: (objs) => {
-      objs.forEach((o, i) => {
+    analyze: (objs) => {
+      const { fresh, dupes } = dedupeByName(objs, D.suppliers);
+      return {
+        summary: [fresh.length + " new supplier" + (fresh.length === 1 ? "" : "s") + " ready to import"],
+        warnings: dupes.length ? ["Skipped as likely duplicates (a supplier with this name already exists): " + dupeList(dupes)] : [],
+        block: fresh.length === 0,
+        importLabel: fresh.length ? "Import " + fresh.length + " supplier" + (fresh.length === 1 ? "" : "s") : "Nothing new to import",
+      };
+    },
+    onImport: async (objs) => {
+      const { fresh, dupes } = dedupeByName(objs, D.suppliers);
+      if (!fresh.length) return false;
+      const snap = JSON.parse(JSON.stringify(D.suppliers || []));
+      fresh.forEach((o, i) => {
         D.suppliers.push({
           id: "s" + Date.now().toString(36) + i,
           name: o.name, contact: o.contact || "—", phone: o.phone || "—",
           addr: o.addr || "—", terms: o.terms || "Net 30", balance: 0,
         });
       });
+      window.logAudit("IMPORT", "Supplier", "suppliers", "suppliers.csv", "Imported " + fresh.length + " suppliers from CSV" + (dupes.length ? " (" + dupes.length + " duplicates skipped)" : ""));
+      const ok = window.persistNow ? await window.persistNow("suppliers") : true;
+      if (!ok) { D.suppliers = snap; pushToast && pushToast("Couldn't save — no connection. Nothing was imported."); return false; }
       setRev((r) => r + 1);
-      window.logAudit("IMPORT", "Supplier", "suppliers", "suppliers.csv", "Imported " + objs.length + " suppliers from CSV");
-      return objs.length;
+      return fresh.length + " supplier" + (fresh.length === 1 ? "" : "s") + " imported" + (dupes.length ? " · " + dupes.length + " duplicate" + (dupes.length === 1 ? "" : "s") + " skipped" : "");
     },
   };
   const activeImport = tab === "clients" ? clientImport : supplierImport;

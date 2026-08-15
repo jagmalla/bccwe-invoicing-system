@@ -328,6 +328,42 @@ app.post("/api/admin/upload", (req, res) => {
   }
 });
 
+// ---- Invoice file attachments ----
+// Files are stored on disk in uploads/ (never in the database JSON, so they
+// don't bloat state saves). The invoice record keeps only { id, name, size }.
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+const ATTACH_EXT = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"];
+const ATTACH_MAX = 5 * 1024 * 1024; // 5 MB per file
+
+app.post("/api/upload-attachment", requireAuth, (req, res) => {
+  try {
+    const name = String((req.body && req.body.name) || "");
+    const data = String((req.body && req.body.data) || "");
+    const ext = path.extname(name).toLowerCase();
+    if (!ATTACH_EXT.includes(ext)) {
+      return res.status(400).json({ ok: false, error: "Only PDF and image files (" + ATTACH_EXT.join(", ") + ") can be attached." });
+    }
+    const buf = Buffer.from(data, "base64");
+    if (!buf.length) return res.status(400).json({ ok: false, error: "Empty file." });
+    if (buf.length > ATTACH_MAX) return res.status(400).json({ ok: false, error: "File is over the 5 MB limit." });
+    if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    const id = crypto.randomBytes(8).toString("hex") + ext; // server-generated name — no path input from the client
+    fs.writeFileSync(path.join(UPLOAD_DIR, id), buf);
+    res.json({ ok: true, id, size: buf.length });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "Could not save the file: " + e.message });
+  }
+});
+
+app.get("/api/attachment/:id", requireAuth, (req, res) => {
+  const id = String(req.params.id || "");
+  // Strict allow-list of the exact shape we generate — blocks any path tricks.
+  if (!/^[a-f0-9]{16}\.[a-z0-9]+$/.test(id)) return res.status(400).json({ error: "bad_id" });
+  const file = path.join(UPLOAD_DIR, id);
+  if (!fs.existsSync(file)) return res.status(404).json({ error: "not_found" });
+  res.sendFile(file);
+});
+
 // ---- Email (real SMTP sending via nodemailer) ----
 // Builds a transporter from a sender profile. enc: "SSL" -> implicit TLS (465),
 // "TLS"/STARTTLS -> 587, "None" -> plain. Port 465 always uses secure.
