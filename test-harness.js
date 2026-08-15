@@ -481,6 +481,21 @@ function testReturnsExchangesExpenses() {
   const wRows = run(D).clientRevenueRows("all", null);
   ok(wRows.length === 1 && wRows[0].walkin && Math.abs(wRows[0].v - 75) < 0.005, "walk-in register sales appear as their own row (75.00)");
 
+  // --- REGRESSION: A/R aging must tie to account 1200 on the Balance Sheet ---
+  D = base();
+  D.clients = [{ id: "c1", name: "Acme" }];
+  D.invoices = [{ no: "I1", clientId: "c1", date: "2026-07-01", due: "2026-07-31", subtotal: 500, gst: 0, pst: 0, total: 500, paid: 200, payMethod: "Debit", lines: [] }];
+  D.cashSales = [{ date: "2026-08-01", clientId: "c1", method: "Debit · partial", subtotal: 300, gst: 0, pst: 0, total: 300, paid: 100, owed: 200, cogs: 0 }];
+  ctx = run(D);
+  // the app's own helpers live in screens-detail.jsx; mirror them for the stub
+  ctx.invStatus = (i) => ((i.total || 0) - (i.paid || 0) > 0.005 ? "Partially Paid" : "Paid");
+  ctx.invOpenBalance = (i) => Math.max(0, (i.total || 0) - (i.paid || 0));
+  const arRows = ctx.receivableRows("all");
+  const arTotal = arRows.reduce((s, r) => s + r.bal, 0);
+  bal = ctx.liveAccountBalances("all");
+  ok(arRows.length === 2, "A/R aging lists BOTH the unpaid invoice and the register on-account sale");
+  ok(Math.abs(arTotal - (bal["1200"] || 0)) < 0.02, "A/R aging total ties to account 1200 (" + arTotal.toFixed(2) + " vs " + (bal["1200"] || 0).toFixed(2) + ")");
+
   // --- the whole point: P&L must equal the ledger on every mix ---
   const mixes = {
     "sale": (x) => { x.invoices = [SALE]; },

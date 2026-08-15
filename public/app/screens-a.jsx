@@ -753,8 +753,12 @@ function People({ go, pushToast }) {
   const pqLower = pq.trim().toLowerCase();
   // A/R derived from the invoices (return-aware), NOT the stored clients[].balance
   // field — nothing maintains that field on invoice creation, so it drifts.
+  // Register sales left "on account" are receivables too (they post to 1200), so
+  // they count here as well — otherwise a customer could owe money that never
+  // showed on their row while the Balance Sheet still carried it.
   const _arOf = (cid) => (D.invoices || []).reduce((s, i) =>
-    s + (i.clientId === cid && i.kind !== "order" && typeof invOpenBalance === "function" ? invOpenBalance(i) : 0), 0);
+    s + (i.clientId === cid && i.kind !== "order" && typeof invOpenBalance === "function" ? invOpenBalance(i) : 0), 0)
+    + (D.cashSales || []).reduce((s, cs) => s + (cs.clientId === cid ? (cs.owed || 0) : 0), 0);
   const clientsAll = applySort(D.clients.map((c) => ({ ...c, prev: (agg[c.id] && agg[c.id].rev) || 0, pprof: (agg[c.id] && agg[c.id].prof) || 0, arBal: _arOf(c.id) })), csort, clientSorts);
   const suppliersAll = applySort(D.suppliers, ssort, supplierSorts);
   const clients = pqLower

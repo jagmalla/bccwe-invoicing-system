@@ -531,6 +531,15 @@ deducted — the report disagreed with the P&L by the whole register + return vo
 unattributed register sales as "Walk-in / cash customers", and is used by both the report and its
 Excel export (with a total row). *Proven: client total 270.00 = P&L revenue 270.00 (was 100.00).*
 
+### Bug 5 — register "on account" sales were missing from A/R  · MEDIUM  *(fixed)*
+A register sale left partly unpaid posts to 1200 Accounts Receivable (correctly), but the **A/R Aging
+report listed invoices only** and the **Clients list derived each client's A/R from invoices only** —
+so a customer could owe money that appeared on the Balance Sheet yet on no report and not on their
+own account row. *Fix:* new shared `receivableRows()` covers unpaid invoices **and** register
+on-account sales (due on the sale date, tagged "register"); it backs the aging report, its Excel
+export and the bucket maths, with a total row. `_arOf()` on the Clients list adds register credit too.
+*Proven: aging total 500.00 = account 1200 500.00 (was 300.00).*
+
 ### Verified CORRECT (no change needed)
 - Return to inventory fully reverses revenue and COGS; stock goes back on the shelf.
 - Defective return reclassifies the cost COGS → 5100 write-off, total expense unchanged (not doubled).
@@ -548,6 +557,18 @@ Excel export (with a total row). *Proven: client total 270.00 = P&L revenue 270.
 - Return netting in item history uses the original sale cost, so a return cancels its sale exactly.
 
 ### Verification
-- [x] Harness → **109 checks green**, including a P&L↔ledger tie across 9 scenario mixes (sale,
+- [x] Harness → **111 checks green**, including a P&L↔ledger tie across 9 scenario mixes (sale,
       return, return+fee, defective, exchange, register sale, register return+defective,
-      write-off+cash expense, and all of it together).
+      write-off+cash expense, and all of it together), plus the A/R-aging↔1200 tie.
+
+### NOT audited in this pass (do not assume clean)
+Named explicitly so the boundary is honest. Each deserves the same treatment:
+- **Purchase orders / receiving** — landed-cost allocation across lines, partial receipts, closing a
+  PO short, supplier prepayments. (Phase 8 built it; this pass only re-verified the A/P total.)
+- **Payments screen** — editing/deleting a payment after the fact, over-payment handling, which bank
+  account a correction lands in.
+- **Deposits on orders (2200)** — converting an order to a sale, and refunding a deposit.
+- **Multi-store correctness** — every scenario above was verified on the combined view; per-store
+  filtering of returns (`cnStoreId` walks back to the original invoice) is reasoned but not tested.
+- **Bank reconciliation** (just built) — only its key helpers are unit-tested, not a full cycle.
+- **Barcode / label printing, email/WhatsApp delivery, attachments** — untouched by this audit.

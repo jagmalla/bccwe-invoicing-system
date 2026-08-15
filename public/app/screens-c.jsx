@@ -1302,11 +1302,12 @@ function Reports({ store, pushToast, go }) {
         ], opts: { title: "BCCWE — GST/PST Remittance", subtitle: storeLabel(sf) + " · " + range.label } };
     }
     if (report === "aging") {
-      const open = (D.invoices || []).filter((i) => i.kind !== "order" && invStatus(i) !== "Paid" && invOpenBalance(i) > 0.005 && storeMatch(i, sf));
+      const open = receivableRows(sf);
       return { filename: "BCCWE-ARAging-" + safeLbl, sheet: "A-R Aging",
-        cols: [{ key: "no", label: "Invoice", type: "text" }, { key: "client", label: "Client", type: "text" }, { key: "due", label: "Due", type: "text" }, { key: "balance", label: "Balance", type: "number" }, { key: "status", label: "Status", type: "text" }],
-        data: open.map((i) => ({ no: i.no, client: clientName(i.clientId), due: i.due || "", balance: money(invOpenBalance(i)), status: invStatus(i) })),
-        opts: { title: "BCCWE — A/R Aging", subtitle: storeLabel(sf) + " · as of " + BCCWE.today } };
+        cols: [{ key: "no", label: "Document", type: "text" }, { key: "client", label: "Client", type: "text" }, { key: "due", label: "Due", type: "text" }, { key: "balance", label: "Balance", type: "number" }, { key: "status", label: "Status", type: "text" }],
+        data: open.map((r) => ({ no: r.no, client: r.clientId ? clientName(r.clientId) : "Walk-in", due: r.due || "", balance: money(r.bal), status: r.status })),
+        opts: { title: "BCCWE — A/R Aging", subtitle: storeLabel(sf) + " · as of " + BCCWE.today,
+          totals: { balance: money(open.reduce((s, r) => s + r.bal, 0)) } } };
     }
     if (report === "ap") {
       const rows = supplierPayableRows(sf).sort((a, b) => String(a.supplier).localeCompare(String(b.supplier)) || String(a.date).localeCompare(String(b.date)));
@@ -1619,31 +1620,51 @@ function TaxReport({ store, range, period, pushToast }) {
   );
 }
 
+// Everything a customer still owes, from BOTH channels: unpaid invoices AND
+// register sales left "on account". The register side was missing, so the aging
+// report never matched account 1200 on the Balance Sheet — money was owed that
+// this report simply didn't list.
+function receivableRows(sf) {
+  const D = BCCWE;
+  const out = [];
+  (D.invoices || []).forEach((i) => {
+    if (i.kind === "order" || !storeMatch(i, sf)) return;
+    if (invStatus(i) === "Paid" || invOpenBalance(i) <= 0.005) return;
+    out.push({ key: i.no, no: i.no, clientId: i.clientId, due: i.due || i.date, bal: invOpenBalance(i), status: invStatus(i), ref: "invoiceview/" + i.no });
+  });
+  (D.cashSales || []).forEach((s, n) => {
+    if (!storeMatch(s, sf) || (s.owed || 0) <= 0.005) return;
+    // Register sales are due immediately, so the sale date is the due date.
+    out.push({ key: (s.id || "cs") + "-" + n, no: (s.kind || "Sale") + " (register)", clientId: s.clientId,
+      due: s.date, bal: +(s.owed || 0).toFixed(2), status: "Unpaid", ref: "", register: true });
+  });
+  return out;
+}
+
 function AgingReport({ store, go }) {
   const D = BCCWE;
   const sf = store || "all";
   const [sort, setSort] = useState("age_desc");
   const buckets = { "Current": 0, "1–30": 0, "31–60": 0, "61–90": 0, "90+": 0 };
   const today = new Date(D.today);
-  // Return-aware open balance, live status, and no order (deposit) invoices —
-  // this report previously trusted the stored status and raw total−paid.
-  const open = D.invoices.filter((i) => i.kind !== "order" && invStatus(i) !== "Paid" && invOpenBalance(i) > 0.005 && storeMatch(i, sf));
-  open.forEach((i) => {
-    const bal = invOpenBalance(i);
-    const age = Math.floor((today - new Date(i.due)) / 86400000);
-    if (age <= 0) buckets["Current"] += bal;
-    else if (age <= 30) buckets["1–30"] += bal;
-    else if (age <= 60) buckets["31–60"] += bal;
-    else if (age <= 90) buckets["61–90"] += bal;
-    else buckets["90+"] += bal;
+  // Return-aware open balances (never the stored status) plus register credit.
+  const open = receivableRows(sf);
+  open.forEach((r) => {
+    const age = Math.floor((today - new Date(r.due)) / 86400000);
+    if (age <= 0) buckets["Current"] += r.bal;
+    else if (age <= 30) buckets["1–30"] += r.bal;
+    else if (age <= 60) buckets["31–60"] += r.bal;
+    else if (age <= 90) buckets["61–90"] += r.bal;
+    else buckets["90+"] += r.bal;
   });
   const agingSorts = {
-    age_desc: { label: "Age — oldest first", get: (i) => today - new Date(i.due), dir: "desc" },
-    balance_desc: { label: "Balance — high to low", get: (i) => invOpenBalance(i), dir: "desc" },
-    due_asc: { label: "Due date — earliest", get: (i) => new Date(i.due).getTime(), dir: "asc" },
-    client_asc: { label: "Client — A to Z", get: (i) => clientName(i.clientId), dir: "asc" },
+    age_desc: { label: "Age — oldest first", get: (r) => today - new Date(r.due), dir: "desc" },
+    balance_desc: { label: "Balance — high to low", get: (r) => r.bal, dir: "desc" },
+    due_asc: { label: "Due date — earliest", get: (r) => new Date(r.due).getTime(), dir: "asc" },
+    client_asc: { label: "Client — A to Z", get: (r) => clientName(r.clientId), dir: "asc" },
   };
   const openRows = applySort(open, sort, agingSorts);
+  const totalAR = open.reduce((s, r) => s + r.bal, 0);
   return (
     <div className="statement">
       <div className="stmt-head"><h3 className="stmt-title">Accounts Receivable Aging</h3><SortControl sort={sort} setSort={setSort} defs={agingSorts} /></div>
@@ -1657,11 +1678,21 @@ function AgingReport({ store, go }) {
       </div>
       <table className="data-table">
         <thead><tr><th>Invoice</th><th>Client</th><th>Due</th><th className="r">Balance</th><th>Status</th></tr></thead>
-        <tbody>{openRows.map((i) => <tr key={i.no}>
-          <td className="mono">{go ? <button className="link mono" onClick={() => go("invoiceview/" + i.no)}>{i.no}</button> : i.no}</td>
-          <td>{go ? <button className="link" onClick={() => go("client/" + i.clientId)}>{clientName(i.clientId)}</button> : clientName(i.clientId)}</td>
-          <td className="muted">{shortDate(i.due)}</td><td className="r mono">{fmt(invOpenBalance(i))}</td><td><Badge tone={statusTone(invStatus(i))} dot>{invStatus(i)}</Badge></td></tr>)}</tbody>
+        <tbody>
+          {openRows.map((r) => <tr key={r.key}>
+            <td className="mono">{go && r.ref ? <button className="link mono" onClick={() => go(r.ref)}>{r.no}</button> : r.no}</td>
+            <td>{r.clientId
+              ? (go ? <button className="link" onClick={() => go("client/" + r.clientId)}>{clientName(r.clientId)}</button> : clientName(r.clientId))
+              : <span className="muted">Walk-in</span>}</td>
+            <td className="muted">{shortDate(r.due)}</td>
+            <td className="r mono">{fmt(r.bal)}</td>
+            <td><Badge tone={statusTone(r.status)} dot>{r.status}</Badge>{r.register && <em className="cat-tag">register</em>}</td>
+          </tr>)}
+          {!openRows.length && <tr><td colSpan="5"><Empty icon="check" text="Nothing outstanding — every sale is paid" /></td></tr>}
+        </tbody>
+        {openRows.length > 0 && <tfoot><tr><td colSpan="3" className="r strong">Total receivable</td><td className="r mono strong">{fmt(totalAR)}</td><td /></tr></tfoot>}
       </table>
+      <div className="stmt-note">Unpaid invoices plus register sales left on account — the total ties to Accounts Receivable on the Balance Sheet.</div>
     </div>
   );
 }
