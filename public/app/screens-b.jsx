@@ -210,6 +210,71 @@ function Inventory({ go, pushToast }) {
     bump();
   }
 
+  // Export EVERY product to a spreadsheet in one click. The first nine columns
+  // use the exact Import-CSV headers, so an exported file re-imports cleanly
+  // (extra computed columns are ignored on import); the rest are read-only
+  // reporting fields. Exports all products, not just the current filter/page.
+  function exportInventory() {
+    const items = D.inventory.slice().sort((a, b) => String(a.code).localeCompare(String(b.code)));
+    const cols = [
+      { key: "code", label: "Item Code" },
+      { key: "name", label: "Description" },
+      { key: "cat", label: "Category" },
+      { key: "supplier", label: "Supplier" },
+      { key: "cost", label: "Cost Price", type: "number" },
+      { key: "price", label: "Sales Price", type: "number" },
+      { key: "stock", label: "Stock", type: "number" },
+      { key: "bonus", label: "Bonus", type: "number" },
+      { key: "alert", label: "Stock Alert", type: "number" },
+      { key: "avgCost", label: "Avg Cost", type: "number" },
+      { key: "lastCost", label: "Last Cost", type: "number" },
+      { key: "margin", label: "Unit Margin", type: "number" },
+      { key: "marginPct", label: "Margin %", type: "number" },
+      { key: "stockValue", label: "Stock Value (cost)", type: "number" },
+      { key: "retailValue", label: "Retail Value", type: "number" },
+      { key: "purchased", label: "Purchased" },
+      { key: "status", label: "Status" },
+    ];
+    let totCost = 0, totRetail = 0;
+    const data = items.map((i) => {
+      const ac = (typeof itemAvgCost === "function") ? itemAvgCost(i) : { avg: i.cost || 0, last: i.cost || 0 };
+      const isService = i.kind === "Service";
+      const stock = isService ? 0 : (i.stock || 0);
+      const margin = (i.price || 0) - (i.cost || 0);
+      const marginPct = i.price ? Math.round((margin / i.price) * 100) : 0;
+      const stockValue = +(stock * (ac.avg || 0)).toFixed(2);
+      const retailValue = +(stock * (i.price || 0)).toFixed(2);
+      totCost += stockValue; totRetail += retailValue;
+      let status = "Service";
+      if (!isService) {
+        const low = (i.alert || 0) > 0 && stock <= i.alert;
+        const st = window.STOCK ? window.STOCK.state(i) : "active";
+        const flags = [];
+        if (low) flags.push("Low");
+        if (st === "dead") flags.push("Dead");
+        else if (st === "notmoving") flags.push("Not moving");
+        status = flags.length ? flags.join(" · ") : "In stock";
+      }
+      return {
+        code: i.code, name: i.name || "", cat: i.cat || "", supplier: supplierName(i.supplier),
+        cost: +(i.cost || 0).toFixed(2), price: +(i.price || 0).toFixed(2),
+        stock, bonus: i.bonus || 0, alert: i.alert || 0,
+        avgCost: +(ac.avg || 0).toFixed(2), lastCost: +(ac.last || 0).toFixed(2),
+        margin: +margin.toFixed(2), marginPct,
+        stockValue, retailValue,
+        purchased: i.purchased || "", status,
+      };
+    });
+    exportXlsx("BCCWE-Inventory", "Inventory", cols, data, {
+      title: "BCCWE — Inventory (all products)",
+      subtitle: items.length + " products · " + fmt(totCost) + " at cost · " + fmt(totRetail) + " retail",
+      totals: { stockValue: +totCost.toFixed(2), retailValue: +totRetail.toFixed(2) },
+    });
+    window.logDownload && window.logDownload({ kind: "XLSX", file: "BCCWE-Inventory.xlsx", docNo: "", clientId: "" });
+    window.logAudit && window.logAudit("DOWNLOAD", "Inventory", "inventory_items", "BCCWE-Inventory.xlsx", "Exported " + items.length + " products to Excel");
+    pushToast && pushToast("Exported " + items.length + " products");
+  }
+
   function saveItem(data, original) {
     // Record stock entered on the item form as a purchase, so it shows up in the
     // item's purchase history with its quantity (and builds a cost layer).
@@ -419,6 +484,7 @@ function Inventory({ go, pushToast }) {
         actions={<>
           <Btn variant="ghost" icon="receipt" onClick={() => setModal({ type: "barcodes" })}>Print barcodes</Btn>
           <Btn variant="ghost" icon="download" onClick={() => setModal({ type: "import" })}>Import CSV</Btn>
+          <Btn variant="ghost" icon="download" onClick={exportInventory}>Export</Btn>
           <Btn variant="ghost" icon="truck" onClick={() => go("purchase")}>New purchase</Btn>
           <Btn variant="primary" icon="plus" onClick={() => setModal({ type: "add" })}>Add item</Btn>
         </>} />

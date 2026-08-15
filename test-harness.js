@@ -191,6 +191,56 @@ function testEditCell() {
   ok(commit("10.00", 10, {}).saved === false, "price unchanged → no save");
 }
 
+// ============================================================================
+// 5. Inventory export — re-imports cleanly + real xlsx.js builds a workbook
+// ============================================================================
+function testInventoryExport() {
+  section("Inventory export (round-trip + xlsx pipeline)");
+
+  // (a) The export's import-field headers must map back to the Import-CSV keys
+  //     even though the export appends extra computed columns.
+  const uiSrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
+  const gridToObjects = new Function(extractFn(uiSrc, "gridToObjects") + "\nreturn gridToObjects;")();
+  const importCols = [
+    { key: "code", label: "Item Code", required: true }, { key: "name", label: "Description" },
+    { key: "cat", label: "Category" }, { key: "supplier", label: "Supplier" },
+    { key: "cost", label: "Cost Price" }, { key: "price", label: "Sales Price" },
+    { key: "stock", label: "Stock" }, { key: "bonus", label: "Bonus" }, { key: "alert", label: "Stock Alert" },
+  ];
+  const header = ["Item Code", "Description", "Category", "Supplier", "Cost Price", "Sales Price", "Stock",
+    "Bonus", "Stock Alert", "Avg Cost", "Last Cost", "Unit Margin", "Margin %", "Stock Value (cost)",
+    "Retail Value", "Purchased", "Status"];
+  const row = ["ABC-1", "Widget", "Part", "Acme Supply", "2.50", "12.00", "40", "4", "10",
+    "2.55", "2.60", "9.50", "79", "102.00", "480.00", "2026-05-01", "In stock"];
+  const objs = gridToObjects([header, row], importCols);
+  ok(objs.length === 1 && objs[0].code === "ABC-1" && objs[0].supplier === "Acme Supply",
+    "export re-imports: text fields map by label past computed columns");
+  ok(objs[0].cost === "2.50" && objs[0].price === "12.00" && objs[0].stock === "40" && objs[0].alert === "10",
+    "export re-imports: numeric fields land on the right keys (not shifted)");
+
+  // (b) The real xlsx.js builds a valid workbook from an export-shaped payload.
+  let captured = null;
+  const sb = {
+    console, TextEncoder, TextDecoder, Uint8Array, Array, Math, String, Number, Date, JSON, isNaN, parseFloat, parseInt,
+    Blob: function (parts) { captured = parts && parts[0]; this.size = captured ? captured.length : 0; },
+    URL: { createObjectURL: () => "blob:x", revokeObjectURL() {} },
+    document: { createElement: () => ({ click() {}, style: {}, setAttribute() {} }), body: { appendChild() {}, removeChild() {} } },
+    setTimeout: (fn) => fn(),
+  };
+  sb.window = sb;
+  vm.createContext(sb);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "public/app/xlsx.js"), "utf8"), sb, { filename: "xlsx.js" });
+  ok(typeof sb.window.exportXlsx === "function", "xlsx: exportXlsx exposed");
+  const cols = header.map((label, i) => ({ key: "k" + i, label, type: i >= 4 && i <= 14 ? "number" : undefined }));
+  const data = [{}, {}].map((_, r) => { const o = {}; cols.forEach((c, i) => { o[c.key] = c.type === "number" ? r + i : "v" + i; }); return o; });
+  let threw = null;
+  try {
+    sb.window.exportXlsx("BCCWE-Inventory", "Inventory", cols, data, { title: "T", subtitle: "2 products", totals: { k13: 102, k14: 480 } });
+  } catch (e) { threw = e; }
+  ok(!threw, "xlsx: exportXlsx runs without throwing" + (threw ? " (" + threw.message + ")" : ""));
+  ok(captured && captured.length > 0 && captured[0] === 0x50 && captured[1] === 0x4b, "xlsx: produced a ZIP-signature workbook");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -198,6 +248,7 @@ function testEditCell() {
     await testSecrets();
     await testAuthz();
     testEditCell();
+    testInventoryExport();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);
