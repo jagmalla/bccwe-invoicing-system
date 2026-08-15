@@ -248,11 +248,24 @@ function storeBalances(filter) {
   // Inventory is held company-wide, so it's only shown in the combined view.
   const inventory = filter === "all" || !filter
     ? (D.inventory || []).reduce((s, it) => s + (it.stock || 0) * (it.cost || 0), 0) : 0;
+  // Supplier payables: landed value of goods received minus payments made on
+  // each order (matches the 2000 posting in liveAccountBalances). ADJ/OPEN
+  // pseudo-orders are opening-stock entries with no supplier bill.
+  let payables = 0;
+  (D.purchaseOrders || []).forEach((po) => {
+    if (!storeMatch(po, filter)) return;
+    if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
+    const pay = (po.payment && +po.payment.amount) || 0;
+    let recvVal = 0;
+    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
+    payables += recvVal - pay;
+  });
   // No Math.max(0,…) clamp: after netting input tax credits a return-heavy or
   // high-purchase period can legitimately leave a net GST *receivable* (negative
   // payable). Clamping it to 0 hid that asset and made the Balance Sheet disagree
   // with the Chart of Accounts (2100/2110).
-  return { cash, ar, inventory, taxPay, deposits };
+  return { cash, ar, inventory, taxPay, deposits, payables };
 }
 function storeLabel(filter) {
   if (!filter || filter === "all") return "All stores (combined)";
@@ -351,6 +364,20 @@ function liveAccountBalances(filter) {
     const sCogs = (s.cogs || 0) - (s.defLoss || 0); // defective units reclassify from COGS…
     if (sCogs) { add("5000", sCogs); add("1300", -sCogs); }
     if (s.defLoss) add("5100", s.defLoss);          // …to Loss on Defective Goods
+  });
+  // Purchases finally touch the books: received goods accrue a supplier payable
+  // (2000) at landed value, and payments made on the order leave cash. ADJ/OPEN
+  // pseudo-orders (opening stock entered on the item form) carry no supplier
+  // bill, so they're skipped. Negative net = prepayment to the supplier.
+  (D.purchaseOrders || []).forEach((po) => {
+    if (!storeMatch(po, filter)) return;
+    if (/^(ADJ|OPEN)-/.test(String(po.po || po.ref || ""))) return;
+    const pay = (po.payment && +po.payment.amount) || 0;
+    if (pay > 0) add((po.payment && po.payment.account) === "1000" ? "1000" : "1010", -pay);
+    let recvVal = 0;
+    const pls = (typeof poLines === "function") ? poLines(po) : (po.lines || []);
+    pls.forEach((l) => { recvVal += (l.qtyReceived || 0) * (l.landedUnit != null ? l.landedUnit : (l.cost || 0)); });
+    add("2000", recvVal - pay);
   });
   // Inventory is held company-wide → only shown in the combined view.
   bal["1300"] = (filter === "all" || !filter)
@@ -463,7 +490,7 @@ function BalanceSheet({ store }) {
   const b = storeBalances(sf);
   const f = storeFinance(sf);
   const assets = b.cash + b.ar + b.inventory;
-  const liabilities = b.taxPay + (b.deposits || 0);
+  const liabilities = b.taxPay + (b.deposits || 0) + (b.payables || 0);
   const equity = assets - liabilities; // plug to retained earnings so the books balance
   return (
     <div className="statement">
@@ -475,6 +502,7 @@ function BalanceSheet({ store }) {
       <StatementRow label="Total assets" value={fmt(assets)} bold />
       <div className="stmt-sec">Liabilities</div>
       <StatementRow label="GST / PST payable" value={fmt(b.taxPay)} indent />
+      {Math.abs(b.payables || 0) > 0.005 && <StatementRow label={(b.payables || 0) >= 0 ? "Accounts payable (suppliers)" : "Supplier prepayments (net)"} value={fmt(b.payables)} indent neg={(b.payables || 0) < 0} />}
       {(b.deposits || 0) > 0.005 && <StatementRow label="Customer deposits" value={fmt(b.deposits)} indent />}
       <StatementRow label="Total liabilities" value={fmt(liabilities)} bold />
       <div className="stmt-sec">Equity</div>

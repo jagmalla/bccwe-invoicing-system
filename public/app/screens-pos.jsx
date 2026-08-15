@@ -64,10 +64,31 @@ function POS({ pushToast, go }) {
       method, sales: u.id || "", paid: total, owed: 0,
     };
     D.cashSales.unshift(sale);
+    // Post the balanced journal entry and update account balances — the header
+    // promises "stock + books update live", but previously no journal was ever
+    // posted for POS sales, so the ledger silently diverged by all POS volume.
+    const r2 = (n) => +(+n).toFixed(2);
+    const isSvc = (l) => String(l.code || "").startsWith("SVC");
+    const goodsRev = r2(cart.filter((l) => !isSvc(l)).reduce((s, l) => s + l.qty * l.price, 0));
+    const svcRev = r2(subtotal - goodsRev);
+    const cashAcct = method === "Cash" ? "1000" : "1010";
+    const revAcct = client && client.type === "Wholesale" ? "4010" : "4000";
+    const J = [];
+    J.push({ acct: cashAcct, name: cashAcct === "1000" ? "Cash on Hand" : "Bank — Operating", dr: total, cr: 0 });
+    if (goodsRev > 0.005) J.push({ acct: revAcct, name: revAcct === "4010" ? "Sales Revenue — Wholesale" : "Sales Revenue — Retail", dr: 0, cr: goodsRev });
+    if (svcRev > 0.005) J.push({ acct: "4100", name: "Service & Repair Revenue", dr: 0, cr: svcRev });
+    taxPostings(m, gst, pst).forEach((c) => { if (c.amount > 0.005) J.push({ acct: c.acct, name: c.acctName, dr: 0, cr: r2(c.amount) }); });
+    if (cogs > 0.005) { J.push({ acct: "5000", name: "Cost of Goods Sold", dr: cogs, cr: 0 }); J.push({ acct: "1300", name: "Inventory", dr: 0, cr: cogs }); }
+    const accSnap = JSON.parse(JSON.stringify(D.accounts || []));
+    const je = { id: "JE-" + Math.floor(Math.random() * 9000 + 1000), date: D.today, memo: "Sale (POS) — " + (client ? client.name : "Walk-in") + " · " + label, lines: J };
+    D.journal.unshift(je);
+    J.forEach((l) => { const a = D.accounts.find((x) => x.code === l.acct); if (a) { const incDr = a.type === "Asset" || a.type === "Expense"; a.balance = +(a.balance + (incDr ? l.dr - l.cr : l.cr - l.dr)).toFixed(2); } });
     window.logAudit("CREATE", "POS sale", "sales", "POS", "POS sale " + fmt(total) + " · " + units + " unit" + (units === 1 ? "" : "s") + (storeObj ? " · " + storeObj.name : ""));
-    const ok = window.persistNow ? await window.persistNow("cashSales", "inventory", "itemSales") : true;
+    const ok = window.persistNow ? await window.persistNow("cashSales", "inventory", "itemSales", "journal", "accounts") : true;
     if (!ok) {
       D.cashSales = D.cashSales.filter((s) => s !== sale);
+      D.journal = D.journal.filter((j) => j !== je);
+      D.accounts = accSnap;
       addedSales.forEach((e) => { const i = D.itemSales.indexOf(e); if (i >= 0) D.itemSales.splice(i, 1); });
       adj.forEach(([it, q]) => { it.stock += q; });
       pushToast && pushToast("Couldn't save — no connection. Your sale is kept on screen; please try again.");

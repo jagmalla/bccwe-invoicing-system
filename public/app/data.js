@@ -924,14 +924,23 @@
   const STOCK_DAY = 86400000;
   const AGE_NOTMOVING = 120;  // 4 months — start reflecting as "not moving"
   const AGE_DEAD = 240;       // a further 4 months unsold — candidate for dead stock
+  // Use the LIVE date and the LIVE itemSales collection at call time. The seed
+  // `today` above is a fixed anchor for demo data only — using it here froze
+  // every item's age, and the closure `itemSales` is the demo array that gets
+  // REPLACED by the DB load, so real sales never showed as movement.
+  function stockNow() {
+    const t = window.BCCWE && window.BCCWE.today;
+    return t ? new Date(t + "T00:00:00") : new Date();
+  }
   function stockAgeDays(item) {
     if (!item || !item.purchased) return 0;
-    return Math.max(0, Math.round((today - new Date(item.purchased)) / STOCK_DAY));
+    return Math.max(0, Math.round((stockNow() - new Date(item.purchased + "T00:00:00")) / STOCK_DAY));
   }
   function stockRecentUnits(code, days) {
-    const cut = new Date(today); cut.setDate(cut.getDate() - days);
-    const c = cut.toISOString().slice(0, 10);
-    return itemSales.filter((s) => s.code === code && s.date >= c).reduce((a, s) => a + s.qty, 0);
+    const cut = stockNow(); cut.setDate(cut.getDate() - days);
+    const c = cut.getFullYear() + "-" + String(cut.getMonth() + 1).padStart(2, "0") + "-" + String(cut.getDate()).padStart(2, "0");
+    return ((window.BCCWE && window.BCCWE.itemSales) || itemSales)
+      .filter((s) => s.code === code && s.date >= c && s.qty > 0).reduce((a, s) => a + s.qty, 0);
   }
   function stockMovement(item) {
     const u90 = stockRecentUnits(item.code, 90);

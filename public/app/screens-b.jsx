@@ -33,7 +33,10 @@ function poFlatLines(filterFn) {
 }
 function itemAvgCost(item) {
   const stock = Math.max(0, item.stock || 0);
-  const recs = poFlatLines((p) => p.code === item.code && p.status === "Received")
+  // Include Partial receipts — their received units are already in stock at
+  // their landed cost, so skipping them made avg/last diverge from the moving
+  // average actually applied at receive time.
+  const recs = poFlatLines((p) => p.code === item.code && (p.status === "Received" || p.status === "Partial") && ((p.qtyReceived == null) || p.qtyReceived > 0))
     .slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
   const last = recs.length && recs[0].landedUnit != null ? recs[0].landedUnit : (item.cost || 0);
   if (stock <= 0) return { avg: item.cost || 0, last, layers: [] };
@@ -41,7 +44,10 @@ function itemAvgCost(item) {
   const layers = [];
   for (let k = 0; k < recs.length && remaining > 0; k++) {
     const p = recs[k];
-    const have = ((p.qtyReceived != null ? p.qtyReceived : p.qty) || 0) + (p.bonusQty || 0); // free bonus units count toward the layer
+    // Bonus units only fold in once the line is fully received (that's when the
+    // receive flow adds them to stock).
+    const gotAll = p.qtyReceived == null || p.qtyReceived >= (p.qty || 0);
+    const have = ((p.qtyReceived != null ? p.qtyReceived : p.qty) || 0) + (gotAll ? (p.bonusQty || 0) : 0);
     const qty = Math.min(remaining, have);
     const unit = p.landedUnit != null ? p.landedUnit : (item.cost || 0);
     if (qty > 0) { totalCost += qty * unit; counted += qty; remaining -= qty; layers.push({ qty, unit, date: p.date }); }
@@ -303,19 +309,34 @@ function Inventory({ go, pushToast }) {
       const code = (o.code || "").trim();
       if (!code) return;
       const num = (v, d) => { const x = parseFloat(String(v).replace(/[^0-9.\-]/g, "")); return isNaN(x) ? d : x; };
-      const data = {
-        code, name: o.name || code, cat: o.cat || "Uncategorized",
-        supplier: supplierIdByName(o.supplier),
-        cost: num(o.cost, 0), price: num(o.price, 0),
-        stock: num(o.stock, 0), bonus: num(o.bonus, 0), alert: num(o.alert, 0),
-      };
       const existing = itemByCode(code);
-      if (existing) Object.assign(existing, data);
-      else D.inventory.push(data);
+      if (existing) {
+        // For EXISTING items only overwrite fields the row actually supplies —
+        // a price-only update CSV must not zero stock/cost or reset the
+        // category/supplier (which the old blanket Object.assign did).
+        const patch = {};
+        if ((o.name || "").trim()) patch.name = o.name.trim();
+        if ((o.cat || "").trim()) patch.cat = o.cat.trim();
+        if ((o.supplier || "").trim()) patch.supplier = supplierIdByName(o.supplier);
+        if (String(o.cost || "").trim() !== "") patch.cost = num(o.cost, existing.cost || 0);
+        if (String(o.price || "").trim() !== "") patch.price = num(o.price, existing.price || 0);
+        if (String(o.stock || "").trim() !== "") patch.stock = Math.round(num(o.stock, existing.stock || 0));
+        if (String(o.bonus || "").trim() !== "") patch.bonus = Math.round(num(o.bonus, existing.bonus || 0));
+        if (String(o.alert || "").trim() !== "") patch.alert = Math.round(num(o.alert, existing.alert || 0));
+        Object.assign(existing, patch);
+      } else {
+        D.inventory.push({
+          code, name: o.name || code, cat: o.cat || "Uncategorized",
+          supplier: supplierIdByName(o.supplier),
+          cost: num(o.cost, 0), price: num(o.price, 0),
+          stock: Math.round(num(o.stock, 0)), bonus: Math.round(num(o.bonus, 0)), alert: Math.round(num(o.alert, 0)),
+        });
+      }
       n++;
     });
     bump();
     window.logAudit("IMPORT", "Product", "inventory_items", n + " items", "Imported " + n + " inventory item" + (n === 1 ? "" : "s") + " from CSV");
+    if (window.persist) window.persist("inventory");
     return n;
   }
 
@@ -388,7 +409,7 @@ function Inventory({ go, pushToast }) {
                     <td className="mono strong">{i.code}</td>
                     <td>{i.name}<em className="cat-tag">{i.cat}</em></td>
                     <td className="r mono">{fmt(itemAvgCost(i).avg)}</td>
-                    <td className="r mono">{fmt(i.cost)}</td>
+                    <td className="r mono">{fmt(itemAvgCost(i).last)}</td>
                     <td className="r mono">{fmt(i.price)}</td>
                     <td className="r mono"><span className="pos">{fmt(margin)}</span> <em className="mpct">{mpct}%</em></td>
                     <td className="r mono strong">{i.stock}</td>
@@ -770,6 +791,10 @@ function ItemFormModal({ item, onSave, onClose }) {
   function submit() {
     if (!valid) return;
     const num = (v) => Math.max(0, parseFloat(v) || 0);
+    // Stock keeps its SIGN: oversells legitimately drive stock negative, and
+    // clamping to 0 here silently erased the oversell AND fabricated a phantom
+    // "stock added" purchase (0 − (−5) = +5) on every unrelated edit.
+    const numStock = (v) => { const x = parseFloat(v); return isNaN(x) ? 0 : Math.round(x); };
     onSave(isService ? {
       // Services are non-physical: no supplier, stock, alert or purchase date,
       // so they never trigger low-stock notifications.
@@ -781,7 +806,7 @@ function ItemFormModal({ item, onSave, onClose }) {
       code: f.code.trim(), name: f.name.trim(), kind: "Product",
       cat: f.cat.trim() || "Uncategorized", subcat: f.subcat || "",
       supplier: f.supplier, cost: num(f.cost), price: num(f.price),
-      stock: Math.round(num(f.stock)), bonus: Math.round(num(f.bonus)), alert: Math.round(num(f.alert)),
+      stock: numStock(f.stock), bonus: Math.round(num(f.bonus)), alert: Math.round(num(f.alert)),
       purchased: f.purchased || D.today,
     });
   }
@@ -1166,9 +1191,30 @@ function OrderDetailPage({ po: ref, go, pushToast }) {
   function saveEdit(patch) {
     const changes = poEditDiff(order, patch);
     if (!changes.length) { setEditOpen(false); pushToast && pushToast("No changes made"); return; }
+    const hadReceipts = poLines(order).some((l) => (l.qtyReceived || 0) > 0);
     Object.assign(order, patch);
+    // Re-derive each line's landed cost from the EDITED cost + charges (same
+    // allocation as PurchasePage: charges shared by line value, bonus units
+    // dilute). Previously landedUnit kept its stale value, so a later receive
+    // stocked the goods at the old cost no matter what was edited.
+    if (Array.isArray(order.lines)) {
+      const ch = order.charges || {};
+      const totalCharges = (+ch.shipping || 0) + (+ch.customs || 0) + (+ch.other || 0);
+      const totalValue = order.lines.reduce((s, l) => s + (l.qty || 0) * (l.cost || 0), 0);
+      order.lines.forEach((l) => {
+        const lineValue = (l.qty || 0) * (l.cost || 0);
+        const share = totalCharges > 0 ? (totalValue > 0 ? totalCharges * (lineValue / totalValue) : totalCharges / order.lines.length) : 0;
+        const u = (l.qty || 0) + (l.bonusQty || 0);
+        l.charge = +share.toFixed(2);
+        l.landedUnit = u > 0 ? +((lineValue + share) / u).toFixed(2) : (l.cost || 0);
+      });
+    }
     order.items = poLines(order).map((l) => (l.name || l.code) + " ×" + l.qty).join(", ");
     order.total = +(poLines(order).reduce((s, l) => s + (l.qty || 0) * (l.cost != null ? l.cost : (l.landedUnit || 0)), 0) + ((order.charges && (order.charges.shipping || 0) + (order.charges.customs || 0) + (order.charges.other || 0)) || 0)).toFixed(2);
+    if (hadReceipts) {
+      changes.push("note: stock already received keeps its previous cost — only future receipts use the new landed cost");
+      pushToast && pushToast("Heads-up: already-received stock keeps its old cost; the new numbers apply to future receipts.");
+    }
     const meNow = window.currentUser ? window.currentUser() : { name: "—" };
     (order.logs = order.logs || []).push({ ts: D.today + " " + new Date().toTimeString().slice(0, 5), user: (meNow && meNow.name) || "—", detail: "Order edited — " + changes.join("; ") });
     window.logAudit("UPDATE", "Purchase", "purchaseOrders", ref0, "Edited order " + ref0 + " — " + changes.join("; "));
@@ -1360,18 +1406,23 @@ function OrderEditModal({ order, onClose, onSave }) {
   const [payAmt, setPayAmt] = useState(pay.amount || 0);
   const [payAcct, setPayAcct] = useState(pay.account || "1010");
   const [lines, setLines] = useState(() => poLines(order).map((l) => Object.assign({}, l)));
+  // Once ANY stock has been received, the status is owned by the receive flow —
+  // hand-flipping it to "Received" here never moved stock and killed the
+  // Receive button, and "Partial" wasn't even in the option list (blank select).
+  const hasReceipts = poLines(order).some((l) => (l.qtyReceived || 0) > 0) || order.status === "Received" || order.status === "Partial";
 
   const setLine = (i, patch) => setLines((ls) => ls.map((l, j) => (j === i ? Object.assign({}, l, patch) : l)));
 
   function submit() {
     const cleanLines = lines.map((l) => Object.assign({}, l, {
-      qty: Math.max(0, parseFloat(l.qty) || 0),
+      // Quantity can never drop below what was already received.
+      qty: Math.max(l.qtyReceived || 0, Math.max(0, parseFloat(l.qty) || 0)),
       bonusQty: Math.max(0, parseFloat(l.bonusQty) || 0),
       cost: Math.max(0, parseFloat(l.cost) || 0),
       price: Math.max(0, parseFloat(l.price) || 0),
     }));
     onSave({
-      supplier, status, date,
+      supplier, status: hasReceipts ? order.status : status, date,
       tracking: tracking.trim() || "—",
       charges: { shipping: +shipping || 0, customs: +customs || 0, other: +other || 0 },
       payment: { mode: payMode, amount: payMode === "none" ? 0 : (+payAmt || 0), account: payAcct },
@@ -1391,10 +1442,12 @@ function OrderEditModal({ order, onClose, onSave }) {
             {D.suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </Field>
-        <Field label="Status">
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            {["Received", "Placed", "In Transit"].map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
+        <Field label="Status" hint={hasReceipts ? "Set automatically by receiving" : "Use “Receive into inventory” to book stock"}>
+          {hasReceipts
+            ? <input value={order.status} readOnly className="ro" title="This order has received stock — status is set by the receive flow" />
+            : <select value={status === "Received" ? "Placed" : status} onChange={(e) => setStatus(e.target.value)}>
+                {["Placed", "In Transit"].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>}
         </Field>
         <Field label="Order date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
         <Field label="Tracking #"><input value={tracking} placeholder="Optional" onChange={(e) => setTracking(e.target.value)} /></Field>
@@ -1407,7 +1460,7 @@ function OrderEditModal({ order, onClose, onSave }) {
           {lines.map((l, i) => (
             <tr key={i}>
               <td><strong>{l.name || l.code}</strong>{l.code ? <em className="cat-tag" style={{ marginLeft: 6 }}>{l.code}</em> : null}</td>
-              <td className="r"><input className="r purch-in" type="number" min="0" value={l.qty} onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
+              <td className="r"><input className="r purch-in" type="number" min={l.qtyReceived || 0} value={l.qty} title={(l.qtyReceived || 0) > 0 ? (l.qtyReceived + " already received — quantity can't go below that") : undefined} onChange={(e) => setLine(i, { qty: e.target.value })} /></td>
               <td className="r"><input className="r purch-in" type="number" min="0" value={l.bonusQty || 0} onChange={(e) => setLine(i, { bonusQty: e.target.value })} /></td>
               <td className="r"><input className="r purch-in" type="number" min="0" step="0.01" value={l.cost != null ? l.cost : (l.landedUnit || 0)} onChange={(e) => setLine(i, { cost: e.target.value })} /></td>
               <td className="r"><input className="r purch-in" type="number" min="0" step="0.01" value={l.price || 0} onChange={(e) => setLine(i, { price: e.target.value })} /></td>
@@ -1450,6 +1503,15 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
   const D = BCCWE;
   const order = (D.purchaseOrders || []).find((p) => (p.ref || p.po) === ref);
   if (!order) return <div><PageHead title="Order not found" actions={<Btn variant="ghost" icon="chevron" onClick={() => go("inventory")}>Back</Btn>} /><Card><Empty text={"No purchase order " + ref} /></Card></div>;
+  // Guard the deep link: a fully received order has nothing left to receive —
+  // a stale tab could previously re-apply the whole receipt a second time.
+  if (order.status === "Received") return (
+    <div>
+      <PageHead title={"Receive order " + (order.ref || order.po)}
+        actions={<Btn variant="ghost" icon="chevron" onClick={() => go("po/" + (order.ref || order.po))}>Back to order</Btn>} />
+      <Card><Empty icon="check" text="This order is already fully received — there is nothing left to receive." /></Card>
+    </div>
+  );
   const ref0 = order.ref || order.po;
   const srcLines = poLines(order);
   // outstanding = ordered minus already received
@@ -1459,23 +1521,31 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
   const [note, setNote] = useState("");
 
   const num = (v) => Math.max(0, Math.round(parseFloat(v) || 0));
+  // Receiving is capped at the outstanding amount — over-typing can't over-stock.
+  const gotFor = (l, i) => Math.min(num(recv[i]), outstanding(l));
   const setRow = (i, v) => setRecv((a) => a.map((x, j) => (j === i ? v : x)));
   const fillAll = () => setRecv(srcLines.map((l) => String(outstanding(l))));
   const clearAll = () => setRecv(srcLines.map(() => "0"));
 
-  const totalUnits = srcLines.reduce((s, l, i) => s + num(recv[i]), 0);
-  const anyShort = srcLines.some((l, i) => num(recv[i]) < outstanding(l));
+  const totalUnits = srcLines.reduce((s, l, i) => s + gotFor(l, i), 0);
+  const anyShort = srcLines.some((l, i) => gotFor(l, i) < outstanding(l));
 
-  function submit() {
+  async function submit() {
     if (totalUnits <= 0 && !window.confirm("You haven't entered any received quantities. Mark the whole order as nothing received?")) return;
+    // Snapshot everything this touches — a failed save must roll all of it back
+    // (previously this fired a debounced persist and navigated away blind).
+    const snapKeys = ["purchaseOrders", "inventory", "orderDiscrepancies"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
     let added = 0;
     const recvLog = [];
     srcLines.forEach((l, i) => {
-      const got = num(recv[i]);
+      const out0 = outstanding(l); // capture BEFORE mutating — the log denominator
+      const got = gotFor(l, i);
       const it = itemByCode(l.code);
       const landed = l.landedUnit != null ? l.landedUnit : (l.cost || 0);
       // bonus comes proportionally — full bonus only if the full outstanding qty arrived
-      const bonus = got >= outstanding(l) && outstanding(l) > 0 ? (l.bonusQty || 0) : 0;
+      const bonus = got >= out0 && out0 > 0 ? (l.bonusQty || 0) : 0;
       const units = got + bonus;
       added += units;
       if (it && units > 0) {
@@ -1491,7 +1561,7 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
       const short = (l.qty || 0) - l.qtyReceived;
       if (l.qtyReceived >= (l.qty || 0)) { delete l.discrepancy; }
       else { l.discrepancy = { ordered: l.qty || 0, received: l.qtyReceived, short, kind: l.qtyReceived === 0 ? "missing" : "short" }; }
-      recvLog.push((l.name || l.code) + " " + got + "/" + outstanding(l) + (short > 0 ? " (short " + short + ")" : ""));
+      recvLog.push((l.name || l.code) + " " + got + "/" + out0 + (short > 0 ? " (short " + short + ")" : ""));
     });
 
     // also write back to legacy flat orders
@@ -1501,8 +1571,11 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
     order.status = fullyReceived ? "Received" : "Partial";
     order.hasDiscrepancy = srcLines.some((l) => (l.qtyReceived || 0) < (l.qty || 0));
 
-    // record discrepancies in a reviewable list
-    D.orderDiscrepancies = D.orderDiscrepancies || [];
+    // Refresh the discrepancy register for THIS order: drop earlier rows and
+    // write only what is STILL short. Previously every partial receive stacked
+    // a new row per line, so the same shortfall was counted multiple times and
+    // resolved rows never cleared.
+    D.orderDiscrepancies = (D.orderDiscrepancies || []).filter((d) => d.ref !== ref0);
     srcLines.forEach((l) => {
       const short = (l.qty || 0) - (l.qtyReceived || 0);
       if (short > 0) {
@@ -1521,7 +1594,13 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
       detail: "Received " + added + " unit(s) — " + recvLog.join("; ") + (note.trim() ? " · note: " + note.trim() : ""),
     });
     window.logAudit("POST", "Purchase", "purchaseOrders", ref0, "Received order " + ref0 + " · " + added + " unit(s)" + (anyShort ? " · discrepancy" : ""));
-    if (window.persist) window.persist("purchaseOrders", "inventory", "orderDiscrepancies");
+    const ok = window.persistNow ? await window.persistNow("purchaseOrders", "inventory", "orderDiscrepancies") : true;
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was received; please try again.");
+      setRecv((a) => a.slice()); // re-render against the restored data
+      return;
+    }
     pushToast && pushToast(ref0 + (fullyReceived ? " fully received" : " partially received") + " · " + added + " unit(s) added");
     go("po/" + ref0);
   }
@@ -1550,7 +1629,7 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
           <tbody>
             {srcLines.map((l, i) => {
               const out = outstanding(l);
-              const got = num(recv[i]);
+              const got = gotFor(l, i);
               const tone = got >= out ? "po-line-ok" : got === 0 ? "po-line-missing" : "po-line-short";
               return (
                 <tr key={i} className={tone}>
@@ -1561,8 +1640,8 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
                   <td>
                     <div style={{ display: "flex", gap: 4, justifyContent: "center", alignItems: "center" }}>
                       <button type="button" style={stepBtn} onClick={() => setRow(i, String(Math.max(0, got - 1)))}>−</button>
-                      <input type="number" min="0" value={recv[i]} onChange={(e) => setRow(i, e.target.value)} style={{ width: 64, textAlign: "center" }} />
-                      <button type="button" style={stepBtn} onClick={() => setRow(i, String(got + 1))}>+</button>
+                      <input type="number" min="0" max={out} value={recv[i]} onChange={(e) => setRow(i, e.target.value)} style={{ width: 64, textAlign: "center" }} />
+                      <button type="button" style={stepBtn} onClick={() => setRow(i, String(Math.min(out, got + 1)))}>+</button>
                     </div>
                   </td>
                   <td>
@@ -1583,8 +1662,8 @@ function ReceiveOrderPage({ po: ref, go, pushToast }) {
           </Field>
           <div className="purchase-summary" style={{ marginTop: 12 }}>
             <div><span>Units to stock</span><strong className="mono">+{totalUnits}</strong></div>
-            <div><span>Discrepancies</span><strong className="mono">{srcLines.filter((l, i) => num(recv[i]) < outstanding(l)).length}</strong></div>
-            <div><span>Result</span><strong>{srcLines.every((l, i) => num(recv[i]) >= outstanding(l)) ? "Fully received" : "Partial / discrepancy"}</strong></div>
+            <div><span>Discrepancies</span><strong className="mono">{srcLines.filter((l, i) => gotFor(l, i) < outstanding(l)).length}</strong></div>
+            <div><span>Result</span><strong>{srcLines.every((l, i) => gotFor(l, i) >= outstanding(l)) ? "Fully received" : "Partial / discrepancy"}</strong></div>
           </div>
         </div>
       </Card>
@@ -2209,7 +2288,7 @@ function QuickSale({ pushToast, onRecorded, store, lockKind }) {
     }
     // Record line sales so price suggestions reflect register sales too.
     if (activeClientId && useOut) outLines.forEach((l) => { if (l.code && l.qty > 0) D.itemSales.unshift({ date: D.today, code: l.code, clientId: activeClientId, qty: l.qty, price: l.price, disc: 0 }); });
-    D.cashSales.unshift({ id: "cs" + Date.now(), companyId: companyId || tagStore, clientId: activeClientId || null, date: D.today, client: clientLabel, type, kind, retDisp, item: label, total: +grand.toFixed(2), subtotal: r2(netSub), gst: r2(gst), pst: r2(pst), cogs: r2(costOut - costRestock), defLoss: r2(defLoss), restockingFee: r2(fee), method: methodLabel, sales: ((window.__session && window.__session.userId) || "u_kev"), settle: settleDir, paid: r2(collected), owed: r2(onAccount), lines: useOut ? outLines.filter((l) => l.code && l.qty > 0).map((l) => ({ code: l.code, name: l.desc, qty: l.qty, price: l.price, cost: (itemByCode(l.code) || {}).cost || 0 })) : [] });
+    D.cashSales.unshift({ id: "cs" + Date.now(), companyId: companyId || tagStore, clientId: activeClientId || null, date: D.today, client: clientLabel, type, kind, retDisp, item: label, total: +grand.toFixed(2), subtotal: r2(netSub), gst: r2(gst), pst: r2(pst), cogs: r2(costOut - costRestock), defLoss: r2(defLoss), restockingFee: r2(fee), method: methodLabel, sales: ((window.sessionUid && window.sessionUid()) || (window.__session && window.__session.userId) || ""), settle: settleDir, paid: r2(collected), owed: r2(onAccount), lines: useOut ? outLines.filter((l) => l.code && l.qty > 0).map((l) => ({ code: l.code, name: l.desc, qty: l.qty, price: l.price, cost: (itemByCode(l.code) || {}).cost || 0 })) : [] });
     // post a balanced journal entry and adjust account balances
     if (regJ.length) {
       const jid = "JE-" + Math.floor(Math.random() * 9000 + 1000);

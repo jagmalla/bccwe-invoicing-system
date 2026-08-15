@@ -77,6 +77,12 @@ function Orders({ go, pushToast }) {
     persist(); close();
   }
   function updateOrder(o, data) {
+    // Preserve received quantities by item code — the edit form rebuilds lines
+    // with qtyReceived: 0, which erased receipt history (and un-resolved
+    // discrepancy math) on every edit of an already-received order.
+    const prevRecv = {};
+    (o.lines || []).forEach((l) => { if (l.code) prevRecv[l.code] = l.qtyReceived || 0; });
+    data.lines.forEach((l) => { l.qtyReceived = prevRecv[l.code] || 0; });
     o.clientId = data.clientId; o.paid = data.paid; o.lines = data.lines;
     pushToast && pushToast(o.id + " updated");
     window.logAudit("UPDATE", "Order", "orders", o.id, "Updated order " + o.id);

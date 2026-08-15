@@ -234,28 +234,40 @@ Root cause: numbers allocated in-memory + full-state last-writer-wins.
 - **Verify:** *(harness-verified)* status/balance across paid/owed-refund/exchange scenarios; cap and discount-refund
       math checked by hand. **Browser smoke-test recommended** for the modal UX (disabled rows, "N left" hint).
 
-### Phase 8 — Inventory / purchase orders / receiving / POS  · HIGH/MEDIUM
-- [ ] **Stock movement/aging read a stale demo closure, not live data.** `data.js:926-936` → read `window.BCCWE.itemSales`.
-- [ ] **Aging clock anchored to hardcoded `2026-06-14`; ages never advance.** `data.js:117,922-929` → use live today.
-- [ ] **POS checkout posts no journal / touches no accounts** — ledger diverges by all POS volume. `screens-pos.jsx:48-78`
-      → build the same journal as QuickSale; include `journal,accounts` in save/rollback.
-- [ ] **Discrepancy records duplicate on every re-receive and never clear.** `screens-b.jsx:1505-1516` → dedup by
-      `ref+code`; remove when `short<=0`.
-- [ ] **Editing a PO's cost/charges doesn't update `landedUnit`** → stock costed at stale value; post-receipt edits
-      don't retro-adjust. `screens-b.jsx:1412,1476` → recompute landed on edit; warn when `qtyReceived>0`.
-- [ ] **Editing an oversold item zeroes negative stock and fabricates a phantom purchase.** `screens-b.jsx:772,784,169-173`
-      → preserve stock sign in the edit path; only log an ADJ PO on explicit increase.
-- [ ] **Over-receiving is unbounded; the `/receive` route has no already-received guard.** `screens-b.jsx:1461-1490` →
-      cap/confirm `got>outstanding`; guard fully-received orders.
-- [ ] **Landed charges allocated on ordered qty but absorbed per received unit → freight vanishes on partials.**
-      `screens-b.jsx:926-929,1476-1484` → re-derive per received units or expense the remainder on close-out.
-- [ ] **CSV import overwrites existing stock/cost/category with defaults for absent columns.** `screens-b.jsx:300-316`
-      → merge only columns present in the file.
-- [ ] **Purchases/receipts never touch the books** (no DR Inventory / CR Cash or A/P). `screens-b.jsx:910-968` → post journals.
-- [ ] **`itemAvgCost` ignores Partial receipts** → displayed avg/last diverges from applied cost. `screens-b.jsx:36` → include Partial lines.
-- [ ] **Order edit can flip to "Received" with no stock movement and can't represent "Partial".** `screens-b.jsx:1395-1397`,
-      `screens-orders.jsx:271` → derive status from receipts; preserve `qtyReceived`; validate `qty>=qtyReceived`.
-- **Verify:** partial-receive an order twice (one discrepancy row, correct stock/cost); POS sale updates the ledger; price-only CSV leaves stock intact.
+### Phase 8 — Inventory / purchase orders / receiving / POS  · HIGH/MEDIUM  *(done)*
+- [x] **Stock movement/aging read a stale demo closure.** `data.js` → helpers now read the LIVE `BCCWE.itemSales`
+      (the closure array is replaced by the DB load) and ignore negative rows. *(done)*
+- [x] **Aging clock anchored to hardcoded `2026-06-14`.** `data.js` → `stockNow()` uses the live local date; the seed
+      anchor stays only for demo data. *(done)*
+- [x] **POS checkout posts no journal / accounts.** `screens-pos.jsx` → posts the same balanced entry as the register
+      (cash / revenue split goods-vs-service / GST-PST / COGS-inventory), updates `accounts`, and includes
+      `journal,accounts` in persistNow + rollback. *(done)*
+- [x] **Discrepancy records duplicated on every re-receive, never cleared.** `screens-b.jsx` → each receive replaces
+      the order's rows in the register with the CURRENT outstanding state; fully received → cleared. *(done)*
+- [x] **Editing a PO's cost/charges didn't update `landedUnit`.** `screens-b.jsx` `saveEdit` → landed cost + charge
+      share re-derived per line from the edited numbers (same allocation as PurchasePage); explicit heads-up logged and
+      toasted that already-received stock keeps its old cost. *(done)*
+- [x] **Editing an oversold item zeroed negative stock + fabricated a phantom ADJ purchase.** `screens-b.jsx` →
+      stock keeps its sign in the item form. *(done)*
+- [x] **Over-receiving unbounded; `/receive` reachable on received orders.** `screens-b.jsx` → receiving is capped at
+      the outstanding amount (input max + clamp) and a fully received order shows "nothing left to receive". *(done)*
+- [x] **CSV import overwrote existing stock/cost/category with defaults.** `screens-b.jsx` → existing items only take
+      fields the row actually supplies; import now persists immediately. *(done)*
+- [x] **Purchases/receipts never touched the books.** `screens-c.jsx` → new purchase-order pass: received goods accrue
+      supplier A/P (2000) at landed value, order payments leave cash; ADJ/OPEN opening-stock pseudo-orders excluded;
+      Balance Sheet shows Accounts payable / supplier prepayments. *(done — harness: A/P $25 = 5×$11 − $30 deposit ✓)*
+- [x] **`itemAvgCost` ignored Partial receipts.** `screens-b.jsx` → partial layers count (bonus only once complete);
+      "Last cost" column now actually shows the last landed cost, not the average. *(done — harness ✓)*
+- [x] **Order edit could flip to "Received" with no stock movement / couldn't show "Partial" / qty below received.**
+      `screens-b.jsx` → status is locked once any stock is received (receive flow owns it); "Received" removed from the
+      hand-set options; qty clamped ≥ qtyReceived. `screens-orders.jsx` → editing preserves `qtyReceived` by code. *(done)*
+- [x] Receiving is save-or-stay (`persistNow` + snapshot rollback); receive log shows the right denominator; register
+      salesperson no longer falls back to a hardcoded demo id.
+- [ ] **Deferred:** freight share of never-received units on a closed-short order isn't expensed anywhere (needs a
+      close-out flow); PurchasePage itself still doesn't post its journal at order time (the engine pass above covers
+      the books' end state).
+- **Verify (browser):** partial-receive an order twice → ONE discrepancy row set, correct stock/cost; POS sale appears
+      in the General Journal and CoA; price-only CSV leaves stock/cost intact; edit a received PO → status stays.
 
 ### Phase 9 — Reports & dashboard display  · MEDIUM
 - [ ] **Dashboard "Revenue MTD" uses tax-inclusive totals, counts order deposits, ignores returns.** `screens-a.jsx:49-51,78-79`
