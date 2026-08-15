@@ -528,6 +528,101 @@ function testReturnsExchangesExpenses() {
   });
 }
 
+// ============================================================================
+// 8. Tax split for tax-inclusive imported invoices
+//    The rule that must never break: the invoice TOTAL is unchanged, because
+//    the customer already paid it. Only the subtotal/tax split changes.
+// ============================================================================
+function testTaxSplit() {
+  section("Tax split (imported tax-inclusive invoices)");
+
+  const bsand = { self: {}, navigator: { userAgent: "node" }, document: {}, console };
+  bsand.window = bsand; vm.createContext(bsand);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "public/vendor/babel.min.js"), "utf8"), bsand, { filename: "babel.min.js" });
+  const js = bsand.Babel.transform(fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8"), { presets: ["react"], filename: "screens-a.jsx" }).code;
+
+  const mk = (invoices, creditNotes) => ({
+    today: "2026-08-15", clients: [{ id: "c1", name: "AJ" }], cashSales: [], payments: [], itemSales: [],
+    TAX: { modes: { none: { label: "No tax", gst: 0, pst: 0 }, gst: { label: "GST 5%", gst: 0.05, pst: 0 }, both: { label: "GST+PST", gst: 0.05, pst: 0.07 } } },
+    invoices: invoices || [], creditNotes: creditNotes || [],
+  });
+  const run = (D) => {
+    const ctx = { console, BCCWE: D, storeMatch: () => true, inRange: (d, r) => d >= r.from && d <= r.to,
+      storeLabel: () => "All", fmt: (n) => "$" + (+n).toFixed(2), clientName: () => "AJ",
+      React: { createElement: () => null, Fragment: {} }, useState: (v) => [v, () => {}],
+      useEffect: () => {}, useMemo: (f) => f(), useRef: () => ({}) };
+    ctx.window = ctx; vm.createContext(ctx); vm.runInContext(js, ctx, { filename: "screens-a.js" });
+    return ctx;
+  };
+  const inv = (no, total, extra) => Object.assign({ no, clientId: "c1", date: "2026-08-12", kind: "sale",
+    subtotal: total, gst: 0, pst: 0, total, paid: total, tax: "none" }, extra || {});
+
+  // The user's exact example: $500 + 5% arrived as a $525 total with no tax.
+  let ctx = run(mk([inv("A", 525)]));
+  let t = ctx.taxSplitPlan("all", "gst", null).targets[0];
+  ok(Math.abs(t.after.sub - 500) < 0.005 && Math.abs(t.after.gst - 25) < 0.005, "$525 incl. 5% → $500.00 + $25.00 GST");
+
+  // The invariant, across many awkward amounts and both tax modes.
+  const amounts = [525, 9198, 736.31, 0.99, 1, 33.33, 12345.67, 99999.99, 745.5, 871.5, 630, 226.81, 46881.53];
+  ["gst", "both"].forEach((mode) => {
+    const D = mk(amounts.map((a, i) => inv("I" + mode + i, a)));
+    const plan = run(D).taxSplitPlan("all", mode, null);
+    ok(plan.targets.length === amounts.length, mode + ": every untaxed invoice is picked up");
+    const allExact = plan.targets.every((x) => Math.abs((x.after.sub + x.after.gst + x.after.pst) - x.before.total) < 0.005);
+    ok(allExact, mode + ": subtotal + tax === original total for all " + amounts.length + " amounts (nothing paid changes)");
+    const rate = mode === "gst" ? 0.05 : 0.12;
+    const allBackedOut = plan.targets.every((x) => Math.abs(x.after.sub * (1 + rate) - x.before.total) < 0.02);
+    ok(allBackedOut, mode + ": subtotal × (1 + rate) returns the original total");
+    if (mode === "both") {
+      const splitRight = plan.targets.every((x) => Math.abs(x.after.gst * (0.07 / 0.05) - x.after.pst) < 0.02);
+      ok(splitRight, "both: the carved-out tax divides between GST and PST in rate proportion");
+    }
+  });
+
+  // Skips: invoices that already record tax, and order/deposit invoices.
+  ctx = run(mk([
+    inv("TAXED", 105, { subtotal: 100, gst: 5, tax: "gst" }),
+    inv("ORDER", 200, { kind: "order" }),
+    inv("PLAIN", 525),
+  ]));
+  const nos = ctx.taxSplitPlan("all", "gst", null).targets.map((x) => x.rec.no);
+  ok(nos.length === 1 && nos[0] === "PLAIN", "skips already-taxed invoices and order deposits (picked: " + nos.join(",") + ")");
+
+  // Idempotent: after applying the split the invoice no longer qualifies.
+  const D2 = mk([inv("B", 525)]);
+  const c2 = run(D2);
+  const p2 = c2.taxSplitPlan("all", "gst", null).targets[0];
+  Object.assign(D2.invoices[0], { subtotal: p2.after.sub, gst: p2.after.gst, pst: p2.after.pst, tax: "gst" });
+  ok(c2.taxSplitPlan("all", "gst", null).targets.length === 0, "running it twice changes nothing (already split)");
+
+  // Credit notes follow their invoice so the netting stays right.
+  ctx = run(mk([inv("C", 525)], [{ no: "CN1", origInv: "C", clientId: "c1", date: "2026-08-13", subtotal: -105, gst: 0, pst: 0, total: -105 }]));
+  const tg = ctx.taxSplitPlan("all", "gst", null).targets;
+  const cn = tg.find((x) => x.kind === "credit");
+  ok(!!cn, "a return against a restated invoice is restated too");
+  ok(Math.abs((cn.after.sub + cn.after.gst + cn.after.pst) - (-105)) < 0.005, "credit-note total also unchanged (−105.00)");
+  ok(cn.after.sub < 0 && cn.after.gst < 0, "credit-note split stays negative");
+  // A credit note whose invoice is NOT being restated must be left alone.
+  ctx = run(mk([inv("D", 105, { subtotal: 100, gst: 5, tax: "gst" })], [{ no: "CN2", origInv: "D", clientId: "c1", date: "2026-08-13", subtotal: -105, gst: 0, pst: 0, total: -105 }]));
+  ok(ctx.taxSplitPlan("all", "gst", null).targets.length === 0, "a return is not touched when its invoice isn't being restated");
+
+  // Line rescaling: prices become pre-tax and still add up to the new subtotal.
+  ctx = run(mk([]));
+  let lines = [{ code: "A", qty: 1, price: 525, disc: 0 }];
+  ctx.taxSplitLines(lines, 525, 500);
+  ok(Math.abs(lines[0].price - 500) < 0.005, "single line 525.00 → 500.00");
+  lines = [{ code: "A", qty: 3, price: 2000, disc: 0 }, { code: "B", qty: 2, price: 1599, disc: 0 }];
+  ctx.taxSplitLines(lines, 9198, 8760);
+  let sum = lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc || 0) / 100), 0);
+  ok(Math.abs(sum - 8760) < 0.005, "multi-line prices still add up to the new subtotal (" + sum.toFixed(2) + ")");
+  // An amount that cannot divide evenly must still reconcile to the cent.
+  lines = [{ code: "A", qty: 3, price: 33.33, disc: 0 }, { code: "B", qty: 7, price: 1.11, disc: 10 }];
+  const oldSum = lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc || 0) / 100), 0);
+  ctx.taxSplitLines(lines, oldSum, +(oldSum / 1.05).toFixed(2));
+  sum = lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc || 0) / 100), 0);
+  ok(Math.abs(sum - +(oldSum / 1.05).toFixed(2)) < 0.011, "awkward amounts with a discount still reconcile within a cent");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -538,6 +633,7 @@ function testReturnsExchangesExpenses() {
     testInventoryExport();
     testAccountingEngine();
     testReturnsExchangesExpenses();
+    testTaxSplit();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

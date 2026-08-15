@@ -334,6 +334,226 @@ function buildInvoiceImport(objs, companyId) {
     badRows, dupExisting: [...dupExisting], conflictNos: [...conflictNos], unmatchedItems: [...unmatchedItems] };
 }
 
+/* ---------------- Split tax out of tax-inclusive imported invoices ----------------
+   Data brought over from an older system often stores ONE tax-inclusive figure:
+   a $500 sale plus 5% GST arrives as a $525 total with no tax recorded. The
+   money is right but the books can't see the tax, so revenue is overstated and
+   the GST return misses it.
+
+   This restates those invoices WITHOUT changing what the customer paid: the
+   total stays exactly the same, and the tax is carved out of it —
+       subtotal = total ÷ (1 + rate)   ·   tax = total − subtotal
+   so payments, balances and A/R are untouched. Line prices are scaled by the
+   same factor so the printed document still adds up, and the matching item-sales
+   history rows are scaled too so price suggestions stay pre-tax.
+
+   Only invoices with NO tax recorded are touched, so invoices that already
+   charge tax are left exactly as they are and re-running is harmless. */
+function taxSplitPlan(sf, modeKey, range) {
+  const D = BCCWE;
+  const m = (D.TAX && D.TAX.modes && D.TAX.modes[modeKey]) || null;
+  const rate = m ? ((+m.gst || 0) + (+m.pst || 0)) : 0;
+  const r2 = (n) => Math.round((+n || 0) * 100) / 100;
+  const targets = [];
+  if (!m || rate <= 0) return { rate: 0, targets, m };
+  const eligible = (rec) => Math.abs(rec.gst || 0) < 0.005 && Math.abs(rec.pst || 0) < 0.005 && Math.abs(rec.total || 0) > 0.005;
+  const split = (total) => {
+    const sub = r2(total / (1 + rate));
+    const tax = r2(total - sub);                 // exact: sub + tax === total
+    const gst = rate > 0 ? r2(tax * ((+m.gst || 0) / rate)) : 0;
+    return { sub, gst, pst: r2(tax - gst) };     // gst + pst === tax exactly
+  };
+  (D.invoices || []).forEach((i) => {
+    if (i.kind === "order") return;              // deposits carry no tax of their own
+    if (!storeMatch(i, sf) || !eligible(i)) return;
+    if (range && !inRange(i.date || "", range)) return;
+    targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, total: i.total || 0 }, after: split(i.total || 0) });
+  });
+  // Returns/exchanges must follow their invoice, or the netting would be wrong.
+  const changedNos = {};
+  targets.forEach((t) => { changedNos[t.rec.no] = true; });
+  (D.creditNotes || []).forEach((cn) => {
+    if (!changedNos[cn.origInv] || !eligible(cn)) return;
+    targets.push({ kind: "credit", rec: cn, before: { sub: cn.subtotal || 0, total: cn.total || 0 }, after: split(cn.total || 0) });
+  });
+  return { rate, targets, m };
+}
+
+// Rescale line prices so they still add up to the new (pre-tax) subtotal, then
+// absorb any rounding drift on the largest line. Returns how many lines changed.
+function taxSplitLines(lines, oldSub, newSub) {
+  if (!Array.isArray(lines) || !lines.length || Math.abs(oldSub) < 0.005) return 0;
+  const r2 = (n) => Math.round((+n || 0) * 100) / 100;
+  const factor = newSub / oldSub;
+  let n = 0;
+  lines.forEach((l) => { if (l && l.price != null) { l.price = r2(l.price * factor); n++; } });
+  const ext = (l) => (l.qty || 0) * (l.price || 0) * (1 - ((l.disc || 0) / 100));
+  const drift = r2(newSub - r2(lines.reduce((s, l) => s + ext(l), 0)));
+  if (Math.abs(drift) >= 0.01) {
+    let big = lines[0];
+    lines.forEach((l) => { if (Math.abs(ext(l)) > Math.abs(ext(big))) big = l; });
+    const denom = (big.qty || 0) * (1 - ((big.disc || 0) / 100));
+    if (denom) big.price = r2(big.price + drift / denom);
+  }
+  return n;
+}
+
+function TaxSplitModal({ store, pushToast, onClose }) {
+  const D = BCCWE;
+  const sf = store || "all";
+  const modes = Object.keys((D.TAX && D.TAX.modes) || {}).filter((k) => {
+    const m = D.TAX.modes[k];
+    return ((+m.gst || 0) + (+m.pst || 0)) > 0;
+  });
+  const [modeKey, setModeKey] = useState(modes.indexOf("gst") >= 0 ? "gst" : (modes[0] || ""));
+  const [useRange, setUseRange] = useState(false);
+  const [from, setFrom] = useState("2000-01-01");
+  const [to, setTo] = useState(D.today);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+
+  const range = useRange ? { from: from || "2000-01-01", to: to || D.today } : null;
+  const plan = taxSplitPlan(sf, modeKey, range);
+  const invs = plan.targets.filter((t) => t.kind === "invoice");
+  const cns = plan.targets.filter((t) => t.kind === "credit");
+  const totalMoney = invs.reduce((s, t) => s + t.before.total, 0);
+  const newRevenue = invs.reduce((s, t) => s + t.after.sub, 0);
+  const taxOut = invs.reduce((s, t) => s + t.after.gst + t.after.pst, 0);
+  const modeLabel = (k) => ((D.TAX.modes[k] || {}).label) || k;
+  const sample = invs.slice(0, 3);
+
+  async function apply() {
+    if (!plan.targets.length || busy) return;
+    setBusy(true);
+    const snapKeys = ["invoices", "creditNotes", "itemSales"];
+    const snap = {};
+    try { snapKeys.forEach((k) => { snap[k] = JSON.parse(JSON.stringify(D[k] || [])); }); } catch (e) {}
+    const r2 = (n) => Math.round((+n || 0) * 100) / 100;
+    let lineCount = 0, salesCount = 0;
+    plan.targets.forEach((t) => {
+      const rec = t.rec, a = t.after;
+      // Keep a record of what it was, so this can be traced or undone later.
+      rec.taxSplit = { sub: rec.subtotal || 0, gst: rec.gst || 0, pst: rec.pst || 0, mode: rec.tax || "", at: D.today, rate: plan.rate };
+      const oldSub = rec.subtotal || 0;
+      rec.subtotal = a.sub; rec.gst = a.gst; rec.pst = a.pst; rec.tax = modeKey;
+      // total is deliberately NOT touched — the customer paid what they paid.
+      const lines = Array.isArray(rec.lines) ? rec.lines : null;
+      if (lines && lines.length && Math.abs(oldSub) > 0.005) {
+        const factor = a.sub / oldSub;
+        lineCount += taxSplitLines(lines, oldSub, a.sub);
+        // Item-sales history was written from these same lines — scale it too so
+        // per-item analytics and price suggestions are pre-tax as well.
+        if (t.kind === "invoice") lines.forEach((l) => {
+          if (!l.code) return;
+          const row = (D.itemSales || []).find((s) => (s.inv ? s.inv === rec.no
+            : (s.code === l.code && s.clientId === rec.clientId && s.date === rec.date && s.qty === l.qty && !s.taxSplit)));
+          if (row) { row.price = r2(row.price * factor); row.taxSplit = true; salesCount++; }
+        });
+      }
+    });
+    window.logAudit("UPDATE", "Invoice", "invoices", invs.length + " invoices",
+      "Split " + modeLabel(modeKey) + " out of " + invs.length + " tax-inclusive invoice(s)"
+      + (cns.length ? " and " + cns.length + " credit note(s)" : "")
+      + " · revenue " + fmt(totalMoney) + " → " + fmt(newRevenue) + ", tax " + fmt(taxOut) + " · totals unchanged");
+    const ok = window.persistNow ? await window.persistNow("invoices", "creditNotes", "itemSales") : true;
+    setBusy(false);
+    if (!ok) {
+      snapKeys.forEach((k) => { if (snap[k]) D[k] = snap[k]; });
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed; please try again.");
+      return;
+    }
+    setDone({ n: invs.length, c: cns.length, tax: taxOut, lines: lineCount, sales: salesCount });
+    pushToast && pushToast(invs.length + " invoice(s) restated — " + fmt(taxOut) + " of tax carved out, totals unchanged");
+  }
+
+  if (done) {
+    return (
+      <Modal title="Tax split complete" onClose={onClose}
+        footer={<Btn variant="primary" icon="check" onClick={onClose}>Done</Btn>}>
+        <div className="stmt-check"><Icon name="check" size={15} /> {done.n} invoice{done.n === 1 ? "" : "s"}{done.c ? " and " + done.c + " credit note(s)" : ""} restated</div>
+        <ul className="rail-note" style={{ paddingLeft: 18, lineHeight: 1.9, marginTop: 12 }}>
+          <li><strong>{fmt(done.tax)}</strong> of {modeLabel(modeKey)} is now recorded and will appear on the GST/PST report</li>
+          <li>Every invoice total is unchanged — payments, balances and A/R are exactly as they were</li>
+          <li>{done.lines} line price{done.lines === 1 ? "" : "s"} and {done.sales} item-history row{done.sales === 1 ? "" : "s"} rescaled to pre-tax</li>
+          <li>Revenue on the P&amp;L drops by the tax amount — that money is now a tax liability, not income</li>
+        </ul>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Fix imported tax" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!invs.length || busy} onClick={apply}>
+          {busy ? "Restating…" : invs.length ? "Restate " + invs.length + " invoice" + (invs.length === 1 ? "" : "s") : "Nothing to fix"}
+        </Btn>
+      </>}>
+      <p className="import-lead">
+        For invoices brought in from your old system where the tax is already <strong>inside</strong> the total.
+        The total stays exactly the same — the tax is carved out of it, so what the customer paid never changes.
+      </p>
+
+      <div className="meta-grid">
+        <Field label="Tax that was included in these totals" hint="Rates come from Settings → Tax, so this still works if rates change">
+          <select value={modeKey} onChange={(e) => setModeKey(e.target.value)}>
+            {modes.map((k) => <option key={k} value={k}>{modeLabel(k)} — {Math.round(((+D.TAX.modes[k].gst || 0) + (+D.TAX.modes[k].pst || 0)) * 10000) / 100}%</option>)}
+          </select>
+        </Field>
+        <Field label="Which invoices">
+          <select value={useRange ? "range" : "all"} onChange={(e) => setUseRange(e.target.value === "range")}>
+            <option value="all">All untaxed invoices ({storeLabel ? storeLabel(sf) : "this store"})</option>
+            <option value="range">Only a date range</option>
+          </select>
+        </Field>
+      </div>
+      {useRange && (
+        <div className="period-custom" style={{ marginTop: 10 }}>
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+          <span>→</span>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </div>
+      )}
+
+      <h5 className="iv-sec" style={{ marginTop: 18 }}>What will change</h5>
+      {!invs.length ? (
+        <div className="inline-note" style={{ marginTop: 0 }}>
+          <Icon name="check" size={15} /> No invoices need this — every invoice in scope already records its tax.
+        </div>
+      ) : (
+        <>
+          <div className="kpi-row tri" style={{ marginBottom: 14 }}>
+            <MiniStat label="Invoices to restate" value={invs.length} ico="invoice" />
+            <MiniStat label="Tax carved out" value={fmt(taxOut)} ico="receipt" />
+            <MiniStat label="Money collected (unchanged)" value={fmt(totalMoney)} ico="money" tone="green" />
+          </div>
+          <table className="data-table">
+            <thead><tr><th>Invoice</th><th className="r">Total (stays)</th><th className="r">Subtotal becomes</th><th className="r">{modeLabel(modeKey)}</th></tr></thead>
+            <tbody>
+              {sample.map((t) => (
+                <tr key={t.rec.no}>
+                  <td className="mono">{t.rec.no}</td>
+                  <td className="r mono strong">{fmt(t.before.total)}</td>
+                  <td className="r mono">{fmt(t.before.sub)} → {fmt(t.after.sub)}</td>
+                  <td className="r mono">{fmt(t.after.gst + t.after.pst)}</td>
+                </tr>
+              ))}
+              {invs.length > sample.length && <tr><td colSpan="4" className="muted">…and {invs.length - sample.length} more</td></tr>}
+            </tbody>
+          </table>
+          {cns.length > 0 && (
+            <div className="inline-note"><Icon name="alert" size={15} /> {cns.length} return/exchange against these invoices will be restated the same way, so the netting stays correct.</div>
+          )}
+          <div className="inline-note" style={{ background: "var(--accent-soft)", color: "var(--accent-ink)" }}>
+            <Icon name="alert" size={15} /> Revenue on the P&amp;L will drop by {fmt(taxOut)} — that money becomes tax you owe rather than income.
+            Invoices that already record tax are skipped, so running this twice changes nothing.
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
 /* ---------------- Invoice History ---------------- */
 function InvoiceHistory({ go, pushToast, store }) {
   const D = BCCWE;
@@ -359,6 +579,7 @@ function InvoiceHistory({ go, pushToast, store }) {
   const [showEmail, setShowEmail] = useState(false);
   const [emailInv, setEmailInv] = useState(null);
   const [showImport, setShowImport] = useState(false);
+  const [showTaxFix, setShowTaxFix] = useState(false);
   const range = periodRange(period, from, to);
   const PER = 8;
 
@@ -531,6 +752,7 @@ function InvoiceHistory({ go, pushToast, store }) {
           <Btn variant="ghost" icon="download" onClick={() => setShowImport(true)}>Import CSV</Btn>
           <Btn variant="ghost" icon="mail" onClick={() => setShowEmail(true)}>Email</Btn>
           <Btn variant="ghost" icon="download" onClick={exportExcel}>Export Excel</Btn>
+          {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="receipt" onClick={() => setShowTaxFix(true)}>Fix imported tax</Btn>}
           <Btn variant="primary" icon="plus" onClick={() => go("invoice")}>New invoice</Btn>
         </>} />
 
@@ -626,6 +848,9 @@ function InvoiceHistory({ go, pushToast, store }) {
       </Card>
       {showImport && (
         <ImportModal {...invoiceImport} pushToast={pushToast} onClose={() => setShowImport(false)} />
+      )}
+      {showTaxFix && (
+        <TaxSplitModal store={sf} pushToast={pushToast} onClose={() => setShowTaxFix(false)} />
       )}
       {showEmail && (
         <EmailHistoryModal spec={buildExportSpec()} range={range} go={go}
