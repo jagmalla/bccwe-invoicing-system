@@ -606,6 +606,37 @@ function testTaxSplit() {
   ctx = run(mk([inv("D", 105, { subtotal: 100, gst: 5, tax: "gst" })], [{ no: "CN2", origInv: "D", clientId: "c1", date: "2026-08-13", subtotal: -105, gst: 0, pst: 0, total: -105 }]));
   ok(ctx.taxSplitPlan("all", "gst", null).targets.length === 0, "a return is not touched when its invoice isn't being restated");
 
+  // --- Targeting an explicit list of invoice numbers (mixed tax rates) ---
+  // Some invoices were charged 12% and the rest 5%, so the list must be exact.
+  const padded = ["01712", "01659", "00105", "00004", "00007", "01777"];
+  ctx = run(mk(padded.map((no) => inv(no, 112))));
+  let lp = ctx.taxSplitPlan("all", "both", null, ctx.parseInvNoList("1712, 1659\n105 4 7"));
+  ok(lp.targets.length === 5, "list mode targets exactly the listed invoices (" + lp.targets.length + " of 6)");
+  ok(!lp.targets.some((t) => t.rec.no === "01777"), "an invoice not on the list is left alone");
+  ok(lp.targets.map((t) => t.rec.no).indexOf("00004") >= 0 && lp.targets.map((t) => t.rec.no).indexOf("00007") >= 0,
+    "leading zeros don't matter — 4 and 7 find 00004 and 00007");
+  const t112 = lp.targets[0];
+  ok(Math.abs(t112.after.sub - 100) < 0.005 && Math.abs(t112.after.gst - 5) < 0.005 && Math.abs(t112.after.pst - 7) < 0.005,
+    "$112 incl. 12% → $100.00 + $5.00 GST + $7.00 PST");
+  ok(lp.targets.every((t) => Math.abs((t.after.sub + t.after.gst + t.after.pst) - t.before.total) < 0.005),
+    "list mode: every total unchanged");
+
+  // Entries that match nothing are reported, never silently ignored.
+  lp = ctx.taxSplitPlan("all", "both", null, ctx.parseInvNoList("1712 999999"));
+  ok(lp.unmatched.length === 1 && lp.unmatched[0] === "999999", "a number matching no invoice is reported as not found");
+  ok(lp.targets.length === 1, "the rest of the list still processes");
+
+  // An ambiguous entry is refused rather than guessed at.
+  ctx = run(mk([inv("INV-4", 112), inv("CASH-4", 112)]));
+  lp = ctx.taxSplitPlan("all", "both", null, ctx.parseInvNoList("4"));
+  ok(lp.targets.length === 0 && lp.ambiguous.length === 1, "an entry matching two invoices is refused, not guessed");
+  ok(lp.ambiguous[0].matches.length === 2, "both candidates are named so the full number can be typed");
+
+  // A listed invoice that already records tax is skipped and reported.
+  ctx = run(mk([inv("00050", 105, { subtotal: 100, gst: 5, tax: "gst" })]));
+  lp = ctx.taxSplitPlan("all", "both", null, ctx.parseInvNoList("50"));
+  ok(lp.targets.length === 0 && lp.alreadyTaxed.length === 1, "a listed invoice that already has tax is skipped and reported");
+
   // Line rescaling: prices become pre-tax and still add up to the new subtotal.
   ctx = run(mk([]));
   let lines = [{ code: "A", qty: 1, price: 525, disc: 0 }];

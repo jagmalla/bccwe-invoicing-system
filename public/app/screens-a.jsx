@@ -349,13 +349,26 @@ function buildInvoiceImport(objs, companyId) {
 
    Only invoices with NO tax recorded are touched, so invoices that already
    charge tax are left exactly as they are and re-running is harmless. */
-function taxSplitPlan(sf, modeKey, range) {
+// Invoice numbers are matched leniently, because a list typed or pasted from
+// another system rarely matches the stored formatting: "4" finds "00004",
+// "1712" finds "01712", spacing and case are ignored. Anything that matches
+// nothing — or matches more than one invoice — is reported rather than guessed.
+function invNoKey(s) {
+  const t = String(s == null ? "" : s).trim().toUpperCase();
+  const m = /(\d+)\s*$/.exec(t);
+  return { exact: t, num: m ? String(parseInt(m[1], 10)) : null };
+}
+function parseInvNoList(text) {
+  return String(text || "").split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+function taxSplitPlan(sf, modeKey, range, nos) {
   const D = BCCWE;
   const m = (D.TAX && D.TAX.modes && D.TAX.modes[modeKey]) || null;
   const rate = m ? ((+m.gst || 0) + (+m.pst || 0)) : 0;
   const r2 = (n) => Math.round((+n || 0) * 100) / 100;
-  const targets = [];
-  if (!m || rate <= 0) return { rate: 0, targets, m };
+  const targets = [], unmatched = [], ambiguous = [], alreadyTaxed = [];
+  if (!m || rate <= 0) return { rate: 0, targets, m, unmatched, ambiguous, alreadyTaxed };
   const eligible = (rec) => Math.abs(rec.gst || 0) < 0.005 && Math.abs(rec.pst || 0) < 0.005 && Math.abs(rec.total || 0) > 0.005;
   const split = (total) => {
     const sub = r2(total / (1 + rate));
@@ -363,12 +376,29 @@ function taxSplitPlan(sf, modeKey, range) {
     const gst = rate > 0 ? r2(tax * ((+m.gst || 0) / rate)) : 0;
     return { sub, gst, pst: r2(tax - gst) };     // gst + pst === tax exactly
   };
-  (D.invoices || []).forEach((i) => {
-    if (i.kind === "order") return;              // deposits carry no tax of their own
-    if (!storeMatch(i, sf) || !eligible(i)) return;
-    if (range && !inRange(i.date || "", range)) return;
-    targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, total: i.total || 0 }, after: split(i.total || 0) });
-  });
+  const wanted = Array.isArray(nos) && nos.length ? nos : null;
+  if (wanted) {
+    // Targeting an explicit list: resolve each entry to exactly one invoice.
+    const pool = (D.invoices || []).filter((i) => i.kind !== "order" && storeMatch(i, sf));
+    wanted.forEach((raw) => {
+      const k = invNoKey(raw);
+      let hits = pool.filter((i) => invNoKey(i.no).exact === k.exact);
+      if (!hits.length && k.num) hits = pool.filter((i) => invNoKey(i.no).num === k.num);
+      if (!hits.length) { unmatched.push(raw); return; }
+      if (hits.length > 1) { ambiguous.push({ raw: raw, matches: hits.map((i) => i.no) }); return; }
+      const i = hits[0];
+      if (!eligible(i)) { alreadyTaxed.push(i.no); return; }
+      if (targets.some((t) => t.rec === i)) return;   // same invoice listed twice
+      targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, total: i.total || 0 }, after: split(i.total || 0) });
+    });
+  } else {
+    (D.invoices || []).forEach((i) => {
+      if (i.kind === "order") return;            // deposits carry no tax of their own
+      if (!storeMatch(i, sf) || !eligible(i)) return;
+      if (range && !inRange(i.date || "", range)) return;
+      targets.push({ kind: "invoice", rec: i, before: { sub: i.subtotal || 0, total: i.total || 0 }, after: split(i.total || 0) });
+    });
+  }
   // Returns/exchanges must follow their invoice, or the netting would be wrong.
   const changedNos = {};
   targets.forEach((t) => { changedNos[t.rec.no] = true; });
@@ -376,7 +406,7 @@ function taxSplitPlan(sf, modeKey, range) {
     if (!changedNos[cn.origInv] || !eligible(cn)) return;
     targets.push({ kind: "credit", rec: cn, before: { sub: cn.subtotal || 0, total: cn.total || 0 }, after: split(cn.total || 0) });
   });
-  return { rate, targets, m };
+  return { rate, targets, m, unmatched, ambiguous, alreadyTaxed };
 }
 
 // Rescale line prices so they still add up to the new (pre-tax) subtotal, then
@@ -406,14 +436,16 @@ function TaxSplitModal({ store, pushToast, onClose }) {
     return ((+m.gst || 0) + (+m.pst || 0)) > 0;
   });
   const [modeKey, setModeKey] = useState(modes.indexOf("gst") >= 0 ? "gst" : (modes[0] || ""));
-  const [useRange, setUseRange] = useState(false);
+  const [scope, setScope] = useState("all"); // all | range | list
   const [from, setFrom] = useState("2000-01-01");
   const [to, setTo] = useState(D.today);
+  const [nosText, setNosText] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(null);
 
-  const range = useRange ? { from: from || "2000-01-01", to: to || D.today } : null;
-  const plan = taxSplitPlan(sf, modeKey, range);
+  const range = scope === "range" ? { from: from || "2000-01-01", to: to || D.today } : null;
+  const wantedNos = scope === "list" ? parseInvNoList(nosText) : null;
+  const plan = taxSplitPlan(sf, modeKey, range, wantedNos);
   const invs = plan.targets.filter((t) => t.kind === "invoice");
   const cns = plan.targets.filter((t) => t.kind === "credit");
   const totalMoney = invs.reduce((s, t) => s + t.before.total, 0);
@@ -501,17 +533,35 @@ function TaxSplitModal({ store, pushToast, onClose }) {
           </select>
         </Field>
         <Field label="Which invoices">
-          <select value={useRange ? "range" : "all"} onChange={(e) => setUseRange(e.target.value === "range")}>
-            <option value="all">All untaxed invoices ({storeLabel ? storeLabel(sf) : "this store"})</option>
+          <select value={scope} onChange={(e) => setScope(e.target.value)}>
+            <option value="all">All untaxed invoices ({typeof storeLabel === "function" ? storeLabel(sf) : "this store"})</option>
             <option value="range">Only a date range</option>
+            <option value="list">Only these invoice numbers</option>
           </select>
         </Field>
       </div>
-      {useRange && (
+      {scope === "range" && (
         <div className="period-custom" style={{ marginTop: 10 }}>
           <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
           <span>→</span>
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </div>
+      )}
+      {scope === "list" && (
+        <Field label={"Invoice numbers" + (wantedNos && wantedNos.length ? " — " + wantedNos.length + " entered" : "")}
+          hint="One per line, or separated by commas/spaces. Leading zeros don't matter — 4 finds 00004.">
+          <textarea rows={6} value={nosText} onChange={(e) => setNosText(e.target.value)}
+            placeholder={"1712\n1659\n1650\n…"} style={{ fontFamily: "var(--mono)", fontSize: 12.5 }} />
+        </Field>
+      )}
+      {scope === "list" && (plan.unmatched.length > 0 || plan.ambiguous.length > 0 || plan.alreadyTaxed.length > 0) && (
+        <div className="inline-note">
+          <Icon name="alert" size={15} />
+          <span>
+            {plan.unmatched.length > 0 && <>Not found ({plan.unmatched.length}): <strong className="mono">{plan.unmatched.slice(0, 12).join(", ")}{plan.unmatched.length > 12 ? "…" : ""}</strong>. </>}
+            {plan.ambiguous.length > 0 && <>Matches more than one invoice ({plan.ambiguous.length}): <strong className="mono">{plan.ambiguous.slice(0, 6).map((a) => a.raw + " → " + a.matches.join("/")).join("; ")}</strong> — type the full number for these. </>}
+            {plan.alreadyTaxed.length > 0 && <>Already records tax, so skipped ({plan.alreadyTaxed.length}): <strong className="mono">{plan.alreadyTaxed.slice(0, 12).join(", ")}{plan.alreadyTaxed.length > 12 ? "…" : ""}</strong>.</>}
+          </span>
         </div>
       )}
 
@@ -541,6 +591,11 @@ function TaxSplitModal({ store, pushToast, onClose }) {
               {invs.length > sample.length && <tr><td colSpan="4" className="muted">…and {invs.length - sample.length} more</td></tr>}
             </tbody>
           </table>
+          {scope === "list" && (
+            <p className="rail-note" style={{ marginTop: 10 }}>
+              Matched: <span className="mono">{invs.map((t) => t.rec.no).join(", ")}</span>
+            </p>
+          )}
           {cns.length > 0 && (
             <div className="inline-note"><Icon name="alert" size={15} /> {cns.length} return/exchange against these invoices will be restated the same way, so the netting stays correct.</div>
           )}
