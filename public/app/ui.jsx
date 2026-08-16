@@ -211,16 +211,18 @@ function FilterDropdown({ icon, allLabel, options, sel, onToggle, width }) {
    Every store gets a colour so a combined list can be read at a glance instead
    of row by row. A store keeps its colour by position, so it stays the same
    between visits; setting `color` on the store record overrides that choice.
-   `soft` is the row tint, `ink` the text/edge — both picked to stay readable. */
+   `ink` is the text/edge, `soft` the pill background (needs enough colour to
+   read as a pill), and `tint` the ROW background — kept very close to white,
+   because a whole table of it should differentiate, not decorate. */
 var STORE_PALETTE = [
-  { key: "indigo", label: "Indigo", ink: "#3d4bb0", soft: "#eceefb", line: "#c6cdf2" },
-  { key: "teal", label: "Teal", ink: "#0f766e", soft: "#e2f4f1", line: "#b2e0d9" },
-  { key: "amber", label: "Amber", ink: "#9a5b06", soft: "#fbeeda", line: "#efd3a6" },
-  { key: "rose", label: "Rose", ink: "#ad2f5f", soft: "#fbe9f0", line: "#f1c4d6" },
-  { key: "green", label: "Green", ink: "#2c7a30", soft: "#e7f4e8", line: "#bcdebe" },
-  { key: "violet", label: "Violet", ink: "#743bb0", soft: "#f2eafb", line: "#d9c3f1" },
-  { key: "slate", label: "Slate", ink: "#47546a", soft: "#eef1f5", line: "#cbd3df" },
-  { key: "brown", label: "Brown", ink: "#835530", soft: "#f5ece3", line: "#dfc9b5" },
+  { key: "indigo", label: "Indigo", ink: "#3d4bb0", soft: "#eceefb", line: "#c6cdf2", tint: "#f7f8fe" },
+  { key: "teal", label: "Teal", ink: "#0f766e", soft: "#e2f4f1", line: "#b2e0d9", tint: "#f4fbfa" },
+  { key: "amber", label: "Amber", ink: "#9a5b06", soft: "#fbeeda", line: "#efd3a6", tint: "#fdf8f1" },
+  { key: "rose", label: "Rose", ink: "#ad2f5f", soft: "#fbe9f0", line: "#f1c4d6", tint: "#fdf6f9" },
+  { key: "green", label: "Green", ink: "#2c7a30", soft: "#e7f4e8", line: "#bcdebe", tint: "#f5fbf6" },
+  { key: "violet", label: "Violet", ink: "#743bb0", soft: "#f2eafb", line: "#d9c3f1", tint: "#faf7fe" },
+  { key: "slate", label: "Slate", ink: "#47546a", soft: "#eef1f5", line: "#cbd3df", tint: "#f8fafc" },
+  { key: "brown", label: "Brown", ink: "#835530", soft: "#f5ece3", line: "#dfc9b5", tint: "#fbf7f3" },
 ];
 function storeColor(companyId) {
   if (!companyId) return null;

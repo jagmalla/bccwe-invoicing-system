@@ -1133,7 +1133,7 @@ function InvoiceHistory({ go, pushToast, store }) {
               // every row would be the same colour, which says nothing.
               const sid = window.STORES ? window.STORES.idOf(r) : null;
               const sc = _hs.storeColors ? storeColor(sid) : null;
-              const tint = (sc && sf === "all") ? sc.soft : null;
+              const tint = (sc && sf === "all") ? sc.tint : null;
               // One cell per chosen column, so the table follows the settings
               // panel instead of a fixed row of cells.
               const cell = (key) => {

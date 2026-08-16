@@ -1212,7 +1212,19 @@ function testHistorySettings() {
   // More stores than palette entries must still all get a colour.
   CO = Array.from({ length: 11 }, (_, i) => ({ id: "s" + i, name: "S" + i }));
   const all = CO.map((s) => C.storeColor(s.id));
-  ok(all.every((x) => x && x.soft && x.ink), "every store gets a colour even past the end of the palette");
+  ok(all.every((x) => x && x.soft && x.ink && x.tint), "every store gets a colour even past the end of the palette");
+
+  // The ROW tint is not the pill colour: a whole table of it must stay close to
+  // white, or a single-store view reads as a solid colour block.
+  const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  ok(C.STORE_PALETTE.every((p) => rgb(p.tint).every((v) => v >= 240)),
+    "every row tint is very light (no channel below 240) so a full table of it stays readable");
+  ok(C.STORE_PALETTE.every((p) => {
+    const t = rgb(p.tint), s = rgb(p.soft);
+    return t[0] + t[1] + t[2] > s[0] + s[1] + s[2];
+  }), "the row tint is lighter than the pill colour, not the same value reused");
+  ok(C.STORE_PALETTE.every((p) => rgb(p.ink).reduce((a, v) => a + v, 0) < 420),
+    "the ink stays dark enough to read as text and as the row's left edge");
   ok(new Set(all.slice(0, C.STORE_PALETTE.length).map((x) => x.key)).size === C.STORE_PALETTE.length,
     "the first stores each get a distinct colour before any repeat");
 }
