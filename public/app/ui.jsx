@@ -154,6 +154,37 @@ function SortControl({ sort, setSort, defs, label = "Sort" }) {
 }
 
 /* ---------- period filtering ---------- */
+/* ---------- store colours ----------
+   Every store gets a colour so a combined list can be read at a glance instead
+   of row by row. A store keeps its colour by position, so it stays the same
+   between visits; setting `color` on the store record overrides that choice.
+   `soft` is the row tint, `ink` the text/edge — both picked to stay readable. */
+var STORE_PALETTE = [
+  { key: "indigo", label: "Indigo", ink: "#3d4bb0", soft: "#eceefb", line: "#c6cdf2" },
+  { key: "teal", label: "Teal", ink: "#0f766e", soft: "#e2f4f1", line: "#b2e0d9" },
+  { key: "amber", label: "Amber", ink: "#9a5b06", soft: "#fbeeda", line: "#efd3a6" },
+  { key: "rose", label: "Rose", ink: "#ad2f5f", soft: "#fbe9f0", line: "#f1c4d6" },
+  { key: "green", label: "Green", ink: "#2c7a30", soft: "#e7f4e8", line: "#bcdebe" },
+  { key: "violet", label: "Violet", ink: "#743bb0", soft: "#f2eafb", line: "#d9c3f1" },
+  { key: "slate", label: "Slate", ink: "#47546a", soft: "#eef1f5", line: "#cbd3df" },
+  { key: "brown", label: "Brown", ink: "#835530", soft: "#f5ece3", line: "#dfc9b5" },
+];
+function storeColor(companyId) {
+  if (!companyId) return null;
+  var list = (BCCWE.companies || []);
+  var idx = -1, rec = null;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === companyId) { idx = i; rec = list[i]; break; }
+  }
+  if (!rec) return null;
+  if (rec.color) {
+    for (var j = 0; j < STORE_PALETTE.length; j++) {
+      if (STORE_PALETTE[j].key === rec.color) return STORE_PALETTE[j];
+    }
+  }
+  return STORE_PALETTE[idx % STORE_PALETTE.length];
+}
+
 function periodRange(period, from, to) {
   const today = BCCWE.today;
   const y = today.slice(0, 4), m = today.slice(0, 7);

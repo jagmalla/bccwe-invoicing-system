@@ -222,15 +222,21 @@ function App() {
             <span>{crumbLabel}</span>
           </div>
           <div className="topbar-right">
-            {showStoreSwitcher && (
-              <div className="store-switch" title="Filter everything by store">
+            {showStoreSwitcher && (() => {
+              // The switcher wears the active store's colour, so which store you
+              // are working in is visible without reading the name.
+              const sc = store === "all" ? null : storeColor(store);
+              return (
+              <div className={"store-switch" + (sc ? " tinted" : "")} title="Filter everything by store"
+                style={sc ? { background: sc.soft, color: sc.ink } : undefined}>
                 <Icon name="store" size={15} />
                 <select value={store} onChange={(e) => changeStore(e.target.value)}>
                   {canAll && <option value="all">All stores</option>}
                   {storeOpts.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </div>
-            )}
+              );
+            })()}
             <div className="period">Fiscal period · Jun 2026</div>
             <NotificationsBell go={go} />
             <AccountMenu />
@@ -332,10 +338,13 @@ function StorePicker({ onPick }) {
           New invoices, sales and returns will be filed under the store you pick. You can switch stores anytime from the top bar.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {stores.map((s) => (
-            <button key={s.id} style={opt} onMouseEnter={hoverIn} onMouseLeave={hoverOut} onClick={() => onPick(s.id)}>
+          {stores.map((s) => {
+            const sc = storeColor(s.id);
+            return (
+            <button key={s.id} style={sc ? Object.assign({}, opt, { borderColor: sc.line }) : opt}
+              onMouseEnter={hoverIn} onMouseLeave={hoverOut} onClick={() => onPick(s.id)}>
               <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={dot}><Icon name="store" size={19} /></span>
+                <span style={sc ? Object.assign({}, dot, { background: sc.soft, color: sc.ink }) : dot}><Icon name="store" size={19} /></span>
                 <span>
                   <strong style={{ display: "block", fontSize: 15, color: "var(--ink)" }}>{s.name}</strong>
                   <span style={{ fontSize: 12, color: "var(--ink-3)" }}>{taxLabel(s.taxDefault)} · invoices {(s.invPrefix || "INV")}-…</span>
@@ -343,7 +352,8 @@ function StorePicker({ onPick }) {
               </span>
               <Icon name="chevron" size={18} />
             </button>
-          ))}
+            );
+          })}
           {canAll && stores.length > 1 && (
             <button style={Object.assign({}, opt, { borderStyle: "dashed" })} onMouseEnter={hoverIn} onMouseLeave={hoverOut} onClick={() => onPick("all")}>
               <span style={{ display: "flex", alignItems: "center", gap: 12 }}>

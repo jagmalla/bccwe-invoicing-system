@@ -210,6 +210,7 @@ function StoreFormModal({ store, onSave, onClose }) {
   const [pst, setPst] = useState(store ? (store.pst || "") : "");
   const [logo, setLogo] = useState(store ? (store.logo || "") : "");
   const [active, setActive] = useState(store ? store.active !== false : true);
+  const [color, setColor] = useState(store ? (store.color || "") : "");
   const [show, setShow] = useState(Object.assign(
     { logo: true, tagline: true, address: true, phone: true, email: true, web: true, gst: true, pst: true },
     (store && store.show) || {}
@@ -230,7 +231,7 @@ function StoreFormModal({ store, onSave, onClose }) {
       name: name.trim(), invPrefix: invPrefix.trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || "INV",
       taxDefault, tagline: tagline.trim(), addr1: addr1.trim(), addr2: addr2.trim(),
       phone: phone.trim(), email: email.trim(), web: web.trim(), gst: gst.trim(), pst: pst.trim(),
-      logo, active, show,
+      logo, active, show, color,
     });
   }
 
@@ -256,6 +257,23 @@ function StoreFormModal({ store, onSave, onClose }) {
           </select>
         </Field>
       </div>
+
+      {/* Colour identifies this store at a glance in the combined "All stores"
+          views, so lists can be read by colour instead of row by row. */}
+      <span className="field-label" style={{ marginTop: 14, display: "block" }}>Store colour</span>
+      <div className="store-swatches">
+        <button type="button" className={"swatch auto" + (color === "" ? " on" : "")} onClick={() => setColor("")} title="Pick automatically">
+          Auto
+        </button>
+        {STORE_PALETTE.map((p) => (
+          <button type="button" key={p.key} className={"swatch" + (color === p.key ? " on" : "")}
+            style={{ background: p.soft, color: p.ink, borderColor: color === p.key ? p.ink : p.line }}
+            onClick={() => setColor(p.key)} title={p.label}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+      <p className="rail-note">Used to tint this store's rows in Invoice History and to mark the store switcher in the top bar.</p>
 
       <div className="store-form-sec">Invoice profile — these details print on this store's invoices</div>
       <div className="meta-grid">

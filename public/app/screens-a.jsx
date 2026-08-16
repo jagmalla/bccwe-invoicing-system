@@ -676,7 +676,7 @@ var HIST_COLUMNS = [
 ];
 // The nine columns the list has always shown — so a system with nothing saved
 // looks exactly as it did before this panel existed.
-var HIST_DEFAULT_COLS = { doc: 1, type: 1, client: 1, date: 1, due: 1, sales: 1, total: 1, balance: 1, status: 1 };
+var HIST_DEFAULT_COLS = { doc: 1, type: 1, client: 1, date: 1, due: 1, store: 1, sales: 1, total: 1, balance: 1, status: 1 };
 
 function histSettings() {
   var p = (BCCWE.prefs && BCCWE.prefs.histView) || {};
@@ -685,6 +685,7 @@ function histSettings() {
     pageSize: p.pageSize || 8,
     density: p.density || "normal",
     flagOverdue: p.flagOverdue !== false,
+    storeColors: p.storeColors !== false,
     outstandingOnly: !!p.outstandingOnly,
     defPeriod: p.defPeriod || "all",
     defSort: p.defSort || "date_desc",
@@ -975,6 +976,12 @@ function InvoiceHistory({ go, pushToast, store }) {
               const typeTone = r.txn === "Return" ? "red" : r.txn === "Exchange" ? "blue" : "slate";
               const target = isSale ? r.no : r.origInv;
               const late = histOverdueDays(r);
+              // Colour-code by store so a combined list reads at a glance. The
+              // tint only appears in the "All stores" view — inside one store
+              // every row would be the same colour, which says nothing.
+              const sid = window.STORES ? window.STORES.idOf(r) : null;
+              const sc = _hs.storeColors ? storeColor(sid) : null;
+              const tint = (sc && sf === "all") ? sc.soft : null;
               // One cell per chosen column, so the table follows the settings
               // panel instead of a fixed row of cells.
               const cell = (key) => {
@@ -990,7 +997,11 @@ function InvoiceHistory({ go, pushToast, store }) {
                   case "due": return <td key={key} className="muted nw">{r.due ? shortDate(r.due) : "—"}</td>;
                   case "age": return <td key={key} className="r mono nw">{late ? <span className="neg">{late}d late</span> : "—"}</td>;
                   case "sales": return <td key={key}>{personName(r.sales)}</td>;
-                  case "store": return <td key={key} className="muted">{(window.STORES && window.STORES.nameOf(window.STORES.idOf(r))) || "—"}</td>;
+                  case "store": return <td key={key} className="nw">{sid
+                    ? <span className="store-tag" style={sc ? { background: sc.soft, color: sc.ink, borderColor: sc.line } : undefined}>
+                        {(window.STORES && window.STORES.nameOf(sid)) || "—"}
+                      </span>
+                    : <span className="muted">—</span>}</td>;
                   case "pono": return <td key={key} className="mono muted">{r.poNo || "—"}</td>;
                   case "subtotal": return <td key={key} className="r mono">{fmt(r.subtotal || 0)}</td>;
                   case "tax": return <td key={key} className="r mono">{fmt((r.total || 0) - (r.subtotal || 0))}</td>;
@@ -1001,8 +1012,11 @@ function InvoiceHistory({ go, pushToast, store }) {
                   default: return <td key={key} />;
                 }
               };
+              // The store's colour also runs down the left edge, so it still
+              // identifies the store on rows the overdue red takes over.
               return (
-                <tr key={r.doc} className={(_hs.flagOverdue && late) ? "row-due" : ""}>
+                <tr key={r.doc} className={"store-row" + ((_hs.flagOverdue && late) ? " row-due" : "")}
+                  style={{ background: tint || undefined, boxShadow: sc ? "inset 4px 0 0 " + sc.ink : undefined }}>
                   {_shownCols.map((c) => cell(c.key))}
                   <td className="row-acts">
                     {r.register
@@ -1085,6 +1099,7 @@ function HistorySettingsModal({ pushToast, onClose, onSaved }) {
   const [pageSize, setPageSize] = useState(cur.pageSize);
   const [density, setDensity] = useState(cur.density);
   const [flagOverdue, setFlagOverdue] = useState(cur.flagOverdue);
+  const [storeColors, setStoreColors] = useState(cur.storeColors);
   const [outstandingOnly, setOutstandingOnly] = useState(cur.outstandingOnly);
   const [showTotals, setShowTotals] = useState(cur.showTotals);
   const [defPeriod, setDefPeriod] = useState(cur.defPeriod);
@@ -1095,7 +1110,7 @@ function HistorySettingsModal({ pushToast, onClose, onSaved }) {
 
   function save() {
     D.prefs.histView = {
-      cols: cols, pageSize: pageSize, density: density, flagOverdue: flagOverdue,
+      cols: cols, pageSize: pageSize, density: density, flagOverdue: flagOverdue, storeColors: storeColors,
       outstandingOnly: outstandingOnly, showTotals: showTotals, defPeriod: defPeriod, defSort: defSort,
     };
     if (window.persist) window.persist("prefs");
@@ -1143,6 +1158,19 @@ function HistorySettingsModal({ pushToast, onClose, onSaved }) {
             <option value="compact">Compact — more rows on screen</option>
           </select>
         </Field>
+      </div>
+      <label className="email-pick" style={{ marginTop: 8 }}>
+        <input type="checkbox" checked={storeColors} onChange={() => setStoreColors((v) => !v)} />
+        <span>Colour each row by its store, so you can see at a glance which store an invoice belongs to</span>
+      </label>
+      <div className="store-legend">
+        {(D.companies || []).filter((c) => c.active !== false).map((c) => {
+          const sc = storeColor(c.id);
+          return (
+            <span key={c.id} className="store-tag" style={sc ? { background: sc.soft, color: sc.ink, borderColor: sc.line } : undefined}>{c.name}</span>
+          );
+        })}
+        <em className="muted">Row colours show in the “All stores” view. Change a store’s colour in Settings → Stores.</em>
       </div>
       <label className="email-pick" style={{ marginTop: 8 }}>
         <input type="checkbox" checked={flagOverdue} onChange={() => setFlagOverdue((v) => !v)} />

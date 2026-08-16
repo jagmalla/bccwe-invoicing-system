@@ -933,6 +933,21 @@ tr.row-due td { background: var(--red-soft); }
 tr.hist-tot td { border-top: 2px solid var(--line); background: var(--bg-2, #faf9f7); font-size: 13px; }
 .table-scroll { overflow-x: auto; }
 .table-scroll th, .table-scroll td.nw { white-space: nowrap; }
+/* Store colour coding — the row tint is set inline (each store has its own),
+   so hover must not paint over it; a slight dim reads as hover instead. */
+.store-tag { display: inline-block; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--line);
+  font-size: 11.5px; font-weight: 600; background: var(--surface-2); color: var(--ink-2); }
+.data-table tbody tr.store-row:hover { background: inherit; filter: brightness(.975); }
+.store-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 2px; padding-left: 2px; }
+.store-legend em { font-size: 11.5px; font-style: normal; }
+.store-swatches { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.store-swatches .swatch { padding: 6px 13px; border-radius: 20px; border: 1.5px solid var(--line);
+  font-size: 12px; font-weight: 600; cursor: pointer; background: var(--surface-2); color: var(--ink-2); }
+.store-swatches .swatch.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px currentColor; }
+.store-swatches .swatch.auto { background: var(--surface-2); color: var(--ink-2); }
+/* The top-bar store switcher wears the active store's colour. */
+.store-switch.tinted { border-color: currentColor; }
+.store-switch.tinted select { color: inherit; font-weight: 600; }
 .data-table.tb td { padding: 8px 14px; }
 .aging-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 22px; }
 .aging-cell { padding: 14px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 5px; }

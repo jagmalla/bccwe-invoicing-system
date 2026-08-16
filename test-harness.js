@@ -1060,8 +1060,10 @@ function testHistorySettings() {
   const shown = () => H.HIST_COLUMNS.filter((c) => c.always || H.histSettings().cols[c.key]).map((c) => c.key);
 
   PREFS = {};
-  ok(JSON.stringify(shown()) === JSON.stringify(["doc", "type", "client", "date", "due", "sales", "total", "balance", "status"]),
-    "with nothing saved, the columns match the existing table exactly (no surprise change)");
+  ok(JSON.stringify(shown()) === JSON.stringify(["doc", "type", "client", "date", "due", "sales", "store", "total", "balance", "status"]),
+    "the default columns are the original nine plus Store, which now shows unless turned off");
+  ok(H.histColOn("store"), "Store is on by default");
+  ok(H.histSettings().storeColors === true, "rows are colour-coded by store by default");
   const d = H.histSettings();
   ok(d.pageSize === 8 && d.defPeriod === "all" && d.defSort === "date_desc" && d.flagOverdue === true
     && d.outstandingOnly === false && d.showTotals === true,
@@ -1104,6 +1106,46 @@ function testHistorySettings() {
   ok(H.histOverdueDays({ txn: "Return", due: "2026-08-01", balance: 100 }) === null
     && H.histOverdueDays({ txn: "Sale", due: null, balance: 100 }) === null,
     "returns and register sales (no due date) are never flagged overdue");
+
+  // ---- store colours (shared helper in ui.jsx) ----
+  const usrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
+  const grabU = (n, kind) => {
+    const m = new RegExp((kind || "function") + "\\s+" + n + "\\s*[=(]").exec(usrc);
+    if (kind === "var") {
+      let k = usrc.indexOf("=", m.index) + 1, d = 0;
+      for (; k < usrc.length; k++) { const c = usrc[k]; if ("([{".includes(c)) d++; else if (")]}".includes(c)) d--; else if (c === ";" && d === 0) { k++; break; } }
+      return usrc.slice(m.index, k);
+    }
+    let i = usrc.indexOf("{", m.index), d = 0, e = -1;
+    for (let k = i; k < usrc.length; k++) { if (usrc[k] === "{") d++; else if (usrc[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return usrc.slice(m.index, e);
+  };
+  let CO = [];
+  const C = new Function("BCCWE", grabU("STORE_PALETTE", "var") + "\n" + grabU("storeColor") +
+    "\nreturn {STORE_PALETTE,storeColor};")({ get companies() { return CO; } });
+
+  CO = [{ id: "co_cash", name: "Cash" }, { id: "co_inv", name: "Invoice" }];
+  const a = C.storeColor("co_cash"), b = C.storeColor("co_inv");
+  ok(a && b && a.key !== b.key, "two stores get two different colours");
+  ok(JSON.stringify(C.storeColor("co_cash")) === JSON.stringify(a),
+    "a store's colour is stable — the same store gives the same colour every time");
+  ok(C.storeColor("co_nope") === null && C.storeColor("") === null && C.storeColor(null) === null,
+    "an unknown or missing store gets no colour rather than a wrong one");
+
+  CO = [{ id: "co_cash", name: "Cash", color: "rose" }, { id: "co_inv", name: "Invoice" }];
+  ok(C.storeColor("co_cash").key === "rose", "a colour set on the store record overrides the automatic one");
+  ok(C.storeColor("co_inv").key === b.key, "overriding one store does not shift another store's colour");
+
+  CO = [{ id: "x", name: "X", color: "chartreuse" }];
+  ok(C.storeColor("x") !== null && C.storeColor("x").key !== "chartreuse",
+    "an unrecognised saved colour falls back to a real one instead of breaking the row");
+
+  // More stores than palette entries must still all get a colour.
+  CO = Array.from({ length: 11 }, (_, i) => ({ id: "s" + i, name: "S" + i }));
+  const all = CO.map((s) => C.storeColor(s.id));
+  ok(all.every((x) => x && x.soft && x.ink), "every store gets a colour even past the end of the palette");
+  ok(new Set(all.slice(0, C.STORE_PALETTE.length).map((x) => x.key)).size === C.STORE_PALETTE.length,
+    "the first stores each get a distinct colour before any repeat");
 }
 
 (async function main() {
