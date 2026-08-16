@@ -912,10 +912,84 @@ function StockAging({ pushToast, onMove, setModal }) {
 /* ---------------- Inventory — add / edit item form ---------------- */
 // Generate a valid 8-digit EAN-8 barcode (7 random digits + checksum) that is
 // unique among existing inventory codes — usable as a scannable barcode.
+/* ---------------- Barcodes (GS1 / international standards) ----------------
+   Every product gets a real EAN-8 the moment it is created, and can be given
+   its manufacturer's own barcode later (EAN-13, UPC-A, …) without changing the
+   internal item code.
+
+   The generated numbers deliberately start with **2**: GS1 reserves EAN-8
+   prefixes 0 and 2 for "restricted circulation" — barcodes used inside one
+   business — so a code we mint can never collide with a real product's
+   barcode anywhere in the world. */
 function ean8Check(d7) {
   var sum = 0;
   for (var i = 0; i < 7; i++) sum += (+d7[i]) * (i % 2 === 0 ? 3 : 1);
   return String((10 - (sum % 10)) % 10);
+}
+// EAN-13 / UPC-A share one rule: weight the digits 1,3,1,3… from the LEFT for
+// EAN-13 (12 data digits) and 3,1,3,1… for UPC-A (11 data digits).
+function gs1Check(digits, firstWeight) {
+  var sum = 0;
+  for (var i = 0; i < digits.length; i++) {
+    var w = (i % 2 === 0) ? firstWeight : (firstWeight === 3 ? 1 : 3);
+    sum += (+digits[i]) * w;
+  }
+  return String((10 - (sum % 10)) % 10);
+}
+function ean13Check(d12) { return gs1Check(String(d12), 1); }
+function upcaCheck(d11) { return gs1Check(String(d11), 3); }
+
+var BARCODE_TYPES = [
+  { id: "EAN8", label: "EAN-8 (8 digits)", len: 8 },
+  { id: "EAN13", label: "EAN-13 (13 digits)", len: 13 },
+  { id: "UPC", label: "UPC-A (12 digits)", len: 12 },
+  { id: "CODE128", label: "Code 128 (any characters)", len: 0 },
+];
+// Returns "" when valid, otherwise a plain-English reason.
+function barcodeProblem(value, type) {
+  var v = String(value == null ? "" : value).trim();
+  if (!v) return "";                                   // blank is allowed — no barcode yet
+  if (type === "CODE128") return "";                   // free-form by design
+  var spec = BARCODE_TYPES.filter(function (t) { return t.id === type; })[0];
+  if (!spec) return "";
+  if (!/^\d+$/.test(v)) return "This barcode type is digits only.";
+  if (v.length !== spec.len) return spec.label.split(" (")[0] + " must be exactly " + spec.len + " digits — this has " + v.length + ".";
+  var body = v.slice(0, -1), want;
+  if (type === "EAN8") want = ean8Check(body);
+  else if (type === "EAN13") want = ean13Check(body);
+  else want = upcaCheck(body);
+  if (want !== v.slice(-1)) return "Check digit should be " + want + " — this scans as invalid. Retype it or use Generate.";
+  return "";
+}
+// A fresh in-house EAN-8, unique against every barcode and item code on file.
+function genEan8() {
+  var taken = {};
+  (BCCWE.inventory || []).forEach(function (i) {
+    if (i.barcode) taken[String(i.barcode)] = 1;
+    taken[String(i.code)] = 1;
+  });
+  for (var t = 0; t < 200; t++) {
+    var d7 = "2";                                       // restricted-circulation prefix
+    for (var i = 0; i < 6; i++) d7 += Math.floor(Math.random() * 10);
+    var code = d7 + ean8Check(d7);
+    if (!taken[code]) return code;
+  }
+  return "";
+}
+// The number that should actually be printed/scanned for an item.
+function barcodeOf(item) { return (item && item.barcode) ? String(item.barcode) : String((item && item.code) || ""); }
+function barcodeTypeOf(item) {
+  if (item && item.barcodeType) return item.barcodeType;
+  var v = barcodeOf(item);
+  return /^\d{8}$/.test(v) ? "EAN8" : /^\d{13}$/.test(v) ? "EAN13" : /^\d{12}$/.test(v) ? "UPC" : "CODE128";
+}
+// Scan lookup: match a scanned number against barcodes first, then item codes.
+function itemByBarcode(v) {
+  var s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+  var inv = BCCWE.inventory || [];
+  return inv.filter(function (i) { return String(i.barcode || "") === s; })[0]
+    || inv.filter(function (i) { return String(i.code) === s; })[0] || null;
 }
 function gen8Code() {
   var existing = (BCCWE.inventory || []).map(function (i) { return String(i.code); });
@@ -1056,8 +1130,14 @@ function ItemFormModal({ item, onSave, onClose }) {
     bonus: item ? item.bonus : "",
     alert: item ? item.alert : "",
     purchased: item ? (item.purchased || D.today) : D.today,
+    // A new product gets a valid in-house EAN-8 straight away; an existing one
+    // keeps whatever it has (and can be given the manufacturer's own barcode).
+    barcode: item ? (item.barcode || "") : genEan8(),
+    barcodeType: item ? (item.barcodeType || (item.barcode ? barcodeTypeOf(item) : "EAN8")) : "EAN8",
   }));
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const bcProblem = barcodeProblem(f.barcode, f.barcodeType);
+  const bcDuplicate = f.barcode && (D.inventory || []).some((x) => x !== item && String(x.barcode || "") === String(f.barcode).trim());
   const [, setCatRev] = useState(0);
   if (!Array.isArray(D.catTree)) D.catTree = (D.categories || []).map((n) => ({ name: n, subs: [] }));
   function addCategory() {
@@ -1087,7 +1167,7 @@ function ItemFormModal({ item, onSave, onClose }) {
   const subOpts = (D.catTree.find((c) => c.name === f.cat) || {}).subs || [];
 
   const codeClash = !editing && !!itemByCode(f.code.trim());
-  const valid = f.code.trim() && f.name.trim() && !codeClash;
+  const valid = f.code.trim() && f.name.trim() && !codeClash && !bcProblem && !bcDuplicate;
 
   const isService = f.kind === "Service";
   function submit() {
@@ -1104,12 +1184,14 @@ function ItemFormModal({ item, onSave, onClose }) {
       cat: f.cat.trim() || "Service", subcat: f.subcat || "",
       supplier: "", cost: num(f.cost), price: num(f.price),
       stock: 0, bonus: 0, alert: 0, purchased: "",
+      barcode: String(f.barcode || "").trim(), barcodeType: f.barcodeType || "EAN8",
     } : {
       code: f.code.trim(), name: f.name.trim(), kind: "Product",
       cat: f.cat.trim() || "Uncategorized", subcat: f.subcat || "",
       supplier: f.supplier, cost: num(f.cost), price: num(f.price),
       stock: numStock(f.stock), bonus: Math.round(num(f.bonus)), alert: Math.round(num(f.alert)),
       purchased: f.purchased || D.today,
+      barcode: String(f.barcode || "").trim(), barcodeType: f.barcodeType || "EAN8",
     });
   }
 
@@ -1130,6 +1212,27 @@ function ItemFormModal({ item, onSave, onClose }) {
         <Field label={isService ? "Service code" : "Item code"} required hint={codeClash ? "⚠ Code already exists" : "Unique SKU"}>
           <input value={f.code} disabled={editing} placeholder={isService ? "e.g. SVC-DIAG" : "e.g. IPH-13-128-A"}
             className={codeClash ? "err" : ""} onChange={(e) => set("code", e.target.value)} />
+        </Field>
+        <Field label="Barcode"
+          hint={bcDuplicate ? "⚠ Another product already uses this barcode" : bcProblem ? "⚠ " + bcProblem
+            : (editing && !f.barcode) ? "No barcode yet — Generate makes one" : "Generated for you · replace it with the maker's own if the item has one"}>
+          <div className="input-prefix">
+            <input value={f.barcode} placeholder="Scan or type the barcode" style={{ flex: 1, fontFamily: "var(--mono)" }}
+              className={(bcProblem || bcDuplicate) ? "err" : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                // Typing/scanning a full standard number selects its type for you.
+                const t = /^\d{13}$/.test(v.trim()) ? "EAN13" : /^\d{12}$/.test(v.trim()) ? "UPC"
+                  : /^\d{8}$/.test(v.trim()) ? "EAN8" : f.barcodeType;
+                setF((s) => ({ ...s, barcode: v, barcodeType: t }));
+              }} />
+            <Btn variant="ghost" size="sm" onClick={() => setF((s) => ({ ...s, barcode: genEan8(), barcodeType: "EAN8" }))}>Generate</Btn>
+          </div>
+        </Field>
+        <Field label="Barcode type" hint="Change this if the product carries a manufacturer barcode">
+          <select value={f.barcodeType} onChange={(e) => set("barcodeType", e.target.value)}>
+            {BARCODE_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
         </Field>
         <Field label="Category">
           <div className="input-prefix">

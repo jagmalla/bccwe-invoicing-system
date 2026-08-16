@@ -5,10 +5,13 @@
    ============================================================ */
 function bccweBarcodeDataUrl(code, opts) {
   // Render a single barcode to an offscreen canvas and return a PNG data URL.
+  // `opts.type` is the product's chosen symbology; without it the length of the
+  // number decides, and anything non-standard falls back to Code 128.
   opts = opts || {};
   var cv = document.createElement("canvas");
   var val = String(code || "00000000");
-  var fmt = (/^\d{8}$/.test(val)) ? "EAN8" : "CODE128";
+  var fmt = opts.type
+    || ((/^\d{8}$/.test(val)) ? "EAN8" : (/^\d{13}$/.test(val)) ? "EAN13" : (/^\d{12}$/.test(val)) ? "UPC" : "CODE128");
   try {
     window.JsBarcode(cv, val, { format: fmt, width: 2, height: 60, fontSize: 14, margin: 6, displayValue: true });
   } catch (e) {
@@ -30,13 +33,17 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
   const [showPrice, setShowPrice] = useState(saved.showPrice !== false);
   const [dataUrl, setDataUrl] = useState("");
 
-  const item = list.find((i) => i.code === code) || { code: code, name: "", price: 0 };
+  // `code` holds the VALUE being printed. Selecting a product loads that
+  // product's barcode (falling back to its item code for older records).
+  const item = list.find((i) => String(i.barcode || "") === code) || list.find((i) => i.code === code)
+    || { code: code, name: "", price: 0 };
+  const btype = (typeof barcodeTypeOf === "function" && item.name) ? barcodeTypeOf(item) : null;
   const count = Math.max(1, (Number(rows) || 1) * (Number(cols) || 1));
 
   useEffect(() => {
     if (!window.JsBarcode) { setDataUrl(""); return; }
-    setDataUrl(bccweBarcodeDataUrl(code));
-  }, [code]);
+    setDataUrl(bccweBarcodeDataUrl(code, { type: btype }));
+  }, [code, btype]);
 
   function saveSettings() {
     if (!D.prefs) D.prefs = {};
@@ -88,10 +95,23 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
 
   const num = (v, set) => (e) => set(Math.max(1, parseInt(e.target.value, 10) || 1));
 
+  // Products created before barcodes existed have none. This gives each of them
+  // a valid in-house EAN-8 in one go, leaving anything that already has one.
+  const missing = (D.inventory || []).filter((i) => !i.barcode);
+  async function fillMissing() {
+    if (!missing.length || typeof genEan8 !== "function") return;
+    let n = 0;
+    missing.forEach((i) => { const v = genEan8(); if (v) { i.barcode = v; i.barcodeType = "EAN8"; n++; } });
+    window.logAudit && window.logAudit("UPDATE", "Product", "inventory_items", n + " items", "Generated EAN-8 barcodes for " + n + " product(s)");
+    const ok = window.persistNow ? await window.persistNow("inventory") : true;
+    pushToast && pushToast(ok ? n + " product(s) given a barcode" : "Couldn't save — please try again");
+  }
+
   return (
     <Modal title="Print barcodes" onClose={onClose} wide
       footer={<>
         <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        {missing.length > 0 && <Btn variant="ghost" icon="plus" onClick={fillMissing}>Generate for {missing.length} without one</Btn>}
         <Btn variant="ghost" icon="download" onClick={downloadPng}>Download PNG</Btn>
         <Btn variant="ghost" onClick={saveSettings}>Save layout</Btn>
         <Btn variant="primary" icon="receipt" onClick={printSheet}>Print</Btn>
@@ -101,11 +121,14 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
           <Field label="Product">
             <select value={code} onChange={(e) => setCode(e.target.value)}>
               {list.length === 0 && <option value="">No products yet</option>}
-              {list.map((i) => <option key={i.code} value={i.code}>{i.name} — {i.code}</option>)}
+              {list.map((i) => {
+                const v = (typeof barcodeOf === "function") ? barcodeOf(i) : i.code;
+                return <option key={i.code} value={v}>{i.name} — {v}</option>;
+              })}
             </select>
           </Field>
-          <Field label="Barcode value (8 digits = EAN-8, otherwise Code128)">
-            <input value={code} onChange={(e) => setCode(e.target.value)} />
+          <Field label="Barcode value" hint={btype ? "Printing as " + btype.replace("EAN", "EAN-").replace("UPC", "UPC-A") : "8 digits = EAN-8, 13 = EAN-13, 12 = UPC-A, otherwise Code 128"}>
+            <input value={code} style={{ fontFamily: "var(--mono)" }} onChange={(e) => setCode(e.target.value)} />
           </Field>
           <div style={{ display: "flex", gap: 10 }}>
             <Field label="Rows"><input type="number" min="1" value={rows} onChange={num(rows, setRows)} /></Field>

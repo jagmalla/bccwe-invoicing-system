@@ -17,9 +17,11 @@ function POS({ pushToast, go }) {
 
   const cats = ["All", ...Array.from(new Set(D.inventory.map((i) => i.cat).filter(Boolean)))];
   const ql = q.trim().toLowerCase();
+  // Searching also matches the barcode, so a scanner typing the number into the
+  // search box finds the product.
   const items = D.inventory.filter((i) =>
     (cat === "All" || i.cat === cat) &&
-    (!ql || (i.name + " " + i.code).toLowerCase().includes(ql)));
+    (!ql || (i.name + " " + i.code + " " + (i.barcode || "")).toLowerCase().includes(ql)));
 
   function changeStore(id) {
     setCompanyId(id);
@@ -112,7 +114,18 @@ function POS({ pushToast, go }) {
       <div className="pos-grid">
         <div className="pos-catalog">
           <div className="toolbar">
-            <div className="search"><Icon name="search" size={16} /><input placeholder="Search product or code…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+            <div className="search"><Icon name="search" size={16} />
+              <input placeholder="Scan a barcode, or search by name / code…" value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => {
+                  // A barcode scanner types the number then presses Enter — add
+                  // that product straight to the cart and clear for the next scan.
+                  if (e.key !== "Enter") return;
+                  const hit = (typeof itemByBarcode === "function") ? itemByBarcode(q) : null;
+                  if (hit) { addToCart(hit); setQ(""); }
+                  else if (items.length === 1) { addToCart(items[0]); setQ(""); }
+                }} />
+            </div>
             <div className="seg-filters">{cats.map((c) => <button key={c} className={"chip" + (cat === c ? " on" : "")} onClick={() => setCat(c)}>{c}</button>)}</div>
           </div>
           <div className="pos-products">

@@ -884,6 +884,72 @@ function testPurchasingAndStores() {
   ok(Math.abs((cash.revenue + other.revenue) - all.revenue) < 0.02, "per-store revenue adds up to the combined view");
 }
 
+// ============================================================================
+// 10. Barcodes — real GS1 check digits, in-house generation, validation
+// ============================================================================
+function testBarcodes() {
+  section("Barcodes (EAN-8 / EAN-13 / UPC-A)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+  const grab = (n) => {
+    const m = new RegExp("function\\s+" + n + "\\s*\\(").exec(src);
+    let i = src.indexOf("{", m.index), d = 0, e = -1;
+    for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return src.slice(m.index, e);
+  };
+  const grabVar = (n) => {
+    const m = new RegExp("var\\s+" + n + "\\s*=").exec(src);
+    let k = src.indexOf("=", m.index) + 1, d = 0;
+    for (; k < src.length; k++) { const c = src[k]; if ("([{".includes(c)) d++; else if (")]}".includes(c)) d--; else if (c === ";" && d === 0) { k++; break; } }
+    return src.slice(m.index, k);
+  };
+  let INVENTORY = [];
+  const H = new Function("BCCWE",
+    grab("ean8Check") + "\n" + grab("gs1Check") + "\n" + grab("ean13Check") + "\n" + grab("upcaCheck") + "\n" +
+    grabVar("BARCODE_TYPES") + "\n" + grab("barcodeProblem") + "\n" + grab("genEan8") + "\n" +
+    grab("barcodeOf") + "\n" + grab("barcodeTypeOf") + "\n" + grab("itemByBarcode") + "\n" +
+    "return {ean8Check,ean13Check,upcaCheck,barcodeProblem,genEan8,barcodeOf,barcodeTypeOf,itemByBarcode};"
+  )({ get inventory() { return INVENTORY; } });
+
+  // Check digits must match REAL published barcodes, or scanners reject the label.
+  [["96385074", "EAN-8 reference"], ["55123457", "EAN-8"], ["20886509", "EAN-8"]].forEach(([bc, l]) => {
+    ok(H.ean8Check(bc.slice(0, 7)) === bc.slice(-1), l + " " + bc + " check digit");
+  });
+  [["4006381333931", "EAN-13 (Faber-Castell reference)"], ["5901234123457", "EAN-13"], ["9780201379624", "ISBN-13"]].forEach(([bc, l]) => {
+    ok(H.ean13Check(bc.slice(0, 12)) === bc.slice(-1), l + " check digit");
+  });
+  [["036000291452", "UPC-A reference"], ["012345678905", "UPC-A"]].forEach(([bc, l]) => {
+    ok(H.upcaCheck(bc.slice(0, 11)) === bc.slice(-1), l + " check digit");
+  });
+
+  // Generated in-house codes.
+  INVENTORY = [];
+  const gen = [];
+  for (let i = 0; i < 500; i++) { const v = H.genEan8(); gen.push(v); INVENTORY.push({ code: "X" + i, barcode: v }); }
+  ok(gen.every((v) => /^\d{8}$/.test(v)), "generated barcodes are 8 digits");
+  ok(gen.every((v) => v[0] === "2"), "generated barcodes use the GS1 restricted-circulation prefix 2 (never clash with real products)");
+  ok(gen.every((v) => H.ean8Check(v.slice(0, 7)) === v.slice(-1)), "generated barcodes carry a valid check digit");
+  ok(new Set(gen).size === gen.length, "500 generated barcodes are all unique");
+
+  // Validation.
+  ok(!!H.barcodeProblem("12345678", "EAN8"), "a wrong EAN-8 check digit is rejected");
+  ok(!H.barcodeProblem("96385074", "EAN8"), "a valid EAN-8 is accepted");
+  ok(!!H.barcodeProblem("9638507", "EAN8"), "a short EAN-8 is rejected");
+  ok(!H.barcodeProblem("4006381333931", "EAN13"), "a real EAN-13 is accepted");
+  ok(!!H.barcodeProblem("4006381333930", "EAN13"), "a bad EAN-13 check digit is rejected");
+  ok(!H.barcodeProblem("036000291452", "UPC"), "a real UPC-A is accepted");
+  ok(!H.barcodeProblem("ABC-123", "CODE128"), "Code 128 accepts letters and dashes");
+  ok(!!H.barcodeProblem("ABC", "EAN8"), "letters are rejected for a digits-only symbology");
+  ok(!H.barcodeProblem("", "EAN8"), "a blank barcode is allowed (not every item has one yet)");
+
+  // Scanning.
+  INVENTORY = [{ code: "IPH-13", barcode: "20886509", name: "iPhone" }, { code: "55123457", name: "legacy item" }];
+  ok(H.itemByBarcode("20886509").code === "IPH-13", "scanning a barcode finds its product");
+  ok(H.itemByBarcode("55123457").code === "55123457", "scanning falls back to the item code for older products");
+  ok(H.itemByBarcode("99999999") === null, "an unknown number matches nothing");
+  ok(H.barcodeTypeOf({ barcode: "4006381333931" }) === "EAN13" && H.barcodeTypeOf({ barcode: "036000291452" }) === "UPC",
+    "symbology is inferred from the number's length when not set");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -896,6 +962,7 @@ function testPurchasingAndStores() {
     testReturnsExchangesExpenses();
     testTaxSplit();
     testPurchasingAndStores();
+    testBarcodes();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);
