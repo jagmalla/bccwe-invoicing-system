@@ -948,6 +948,30 @@ function testBarcodes() {
   ok(H.itemByBarcode("99999999") === null, "an unknown number matches nothing");
   ok(H.barcodeTypeOf({ barcode: "4006381333931" }) === "EAN13" && H.barcodeTypeOf({ barcode: "036000291452" }) === "UPC",
     "symbology is inferred from the number's length when not set");
+  // A product with a barcode must print THAT, not its item code.
+  ok(H.barcodeOf({ code: "1-USB-CAR-CHARGER", barcode: "22897701" }) === "22897701",
+    "a product with a barcode prints the barcode, not the item code");
+
+  // The real encoder decides what a label can carry: an item code cannot be an
+  // EAN-8, which is why such labels silently printed as Code 128 text and
+  // scanned back as the item code.
+  const mkCanvas = () => ({
+    getContext: () => ({ canvas: { width: 0, height: 0 }, fillRect() {}, fillText() {}, measureText: () => ({ width: 10 }),
+      save() {}, restore() {}, translate() {}, scale() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, clearRect() {} }),
+    setAttribute(k, v) { this[k] = v; }, getAttribute(k) { return this[k]; },
+    toDataURL: () => "data:image/png;base64,AA==", nodeName: "CANVAS", width: 0, height: 0, style: {},
+  });
+  const jctx = { console, document: { createElement: mkCanvas, createElementNS: mkCanvas },
+    navigator: { userAgent: "node" }, Math, String, Number, Array, Object, JSON, parseInt, parseFloat, isNaN, Error, TypeError, RegExp, Date };
+  jctx.window = jctx; jctx.self = jctx; vm.createContext(jctx);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "public/vendor/JsBarcode.all.min.js"), "utf8"), jctx, { filename: "JsBarcode.js" });
+  const JsBarcode = jctx.window.JsBarcode || jctx.JsBarcode;
+  ok(typeof JsBarcode === "function", "the vendored JsBarcode loads");
+  const renders = (v, f) => { try { JsBarcode(mkCanvas(), v, { format: f, width: 2, height: 60, displayValue: true }); return true; } catch (e) { return false; } };
+  ok(renders("22897701", "EAN8"), "a generated barcode really renders as an EAN-8 symbol");
+  ok(!renders("1-USB-CAR-CHARGER", "EAN8"), "an item code cannot render as EAN-8 (so it must never be sent as one)");
+  ok(renders("4006381333931", "EAN13"), "a real EAN-13 renders as EAN-13");
+  ok(!renders("12345678", "EAN8"), "the encoder itself refuses a bad check digit");
 }
 
 (async function main() {

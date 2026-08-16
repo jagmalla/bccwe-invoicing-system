@@ -24,7 +24,15 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
   const D = BCCWE;
   const list = (items && items.length ? items : (D.inventory || []));
   const saved = (D.prefs && D.prefs.barcode) || {};
-  const [code, setCode] = useState(initialCode || (list[0] && list[0].code) || "");
+  // Callers open this with an ITEM CODE (the Print-barcode button on a stock
+  // row). Resolve it to that product's actual barcode, or the label prints the
+  // item code as Code 128 and a scan reads back "1-USB-CAR-CHARGER".
+  const [code, setCode] = useState(() => {
+    const inv = (items && items.length ? items : (D.inventory || []));
+    const start = initialCode || (inv[0] && (inv[0].barcode || inv[0].code)) || "";
+    const hit = inv.filter((i) => String(i.barcode || "") === String(start) || String(i.code) === String(start))[0];
+    return hit ? ((typeof barcodeOf === "function") ? barcodeOf(hit) : (hit.barcode || hit.code)) : start;
+  });
   const [rows, setRows] = useState(saved.rows || 10);
   const [cols, setCols] = useState(saved.cols || 3);
   const [labelH, setLabelH] = useState(saved.labelH || 25); // mm
@@ -37,13 +45,33 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
   // product's barcode (falling back to its item code for older records).
   const item = list.find((i) => String(i.barcode || "") === code) || list.find((i) => i.code === code)
     || { code: code, name: "", price: 0 };
-  const btype = (typeof barcodeTypeOf === "function" && item.name) ? barcodeTypeOf(item) : null;
+  // What the label will ACTUALLY carry. A value that isn't valid for the chosen
+  // symbology falls back to Code 128, which is why an item code printed as a
+  // barcode scanned back as text — so say so plainly instead of claiming EAN-8.
+  const wantType = (typeof barcodeTypeOf === "function" && item.name) ? barcodeTypeOf(item) : null;
+  const badFor = (typeof barcodeProblem === "function" && wantType) ? barcodeProblem(code, wantType) : "";
+  const printType = (wantType && !badFor) ? wantType : "CODE128";
+  const prettyType = printType === "EAN8" ? "EAN-8" : printType === "EAN13" ? "EAN-13" : printType === "UPC" ? "UPC-A" : "Code 128";
+  const noBarcode = !!(item.name && !item.barcode);
   const count = Math.max(1, (Number(rows) || 1) * (Number(cols) || 1));
 
   useEffect(() => {
     if (!window.JsBarcode) { setDataUrl(""); return; }
-    setDataUrl(bccweBarcodeDataUrl(code, { type: btype }));
-  }, [code, btype]);
+    setDataUrl(bccweBarcodeDataUrl(code, { type: printType }));
+  }, [code, printType]);
+
+  // Give THIS product a proper EAN-8 without leaving the dialog.
+  async function makeBarcode() {
+    const target = (D.inventory || []).filter((i) => i.code === item.code)[0];
+    if (!target || typeof genEan8 !== "function") return;
+    const v = genEan8();
+    if (!v) { pushToast && pushToast("Could not generate a barcode"); return; }
+    target.barcode = v; target.barcodeType = "EAN8";
+    window.logAudit && window.logAudit("UPDATE", "Product", "inventory_items", target.code, "Generated EAN-8 barcode " + v);
+    setCode(v);
+    const ok = window.persistNow ? await window.persistNow("inventory") : true;
+    pushToast && pushToast(ok ? target.code + " barcode set to " + v : "Couldn't save — please try again");
+  }
 
   function saveSettings() {
     if (!D.prefs) D.prefs = {};
@@ -53,7 +81,7 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
   }
 
   function labelHtml() {
-    var url = dataUrl || bccweBarcodeDataUrl(code);
+    var url = dataUrl || bccweBarcodeDataUrl(code, { type: printType });
     var one = '<div class="lbl">' +
       '<img src="' + url + '"/>' +
       (showName ? '<div class="nm">' + String(item.name || "").replace(/</g, "&lt;") + '</div>' : "") +
@@ -85,7 +113,7 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
 
   function downloadPng() {
     // Single high-res barcode PNG for this product.
-    var url = bccweBarcodeDataUrl(code);
+    var url = bccweBarcodeDataUrl(code, { type: printType });
     if (!url) { pushToast && pushToast("Could not generate barcode"); return; }
     var a = document.createElement("a");
     a.href = url; a.download = (item.code || "barcode") + ".png";
@@ -127,9 +155,21 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
               })}
             </select>
           </Field>
-          <Field label="Barcode value" hint={btype ? "Printing as " + btype.replace("EAN", "EAN-").replace("UPC", "UPC-A") : "8 digits = EAN-8, 13 = EAN-13, 12 = UPC-A, otherwise Code 128"}>
+          <Field label="Barcode value" hint={"Printing as " + prettyType + (badFor ? " — not a valid " + (wantType === "EAN8" ? "EAN-8" : wantType) : "")}>
             <input value={code} style={{ fontFamily: "var(--mono)" }} onChange={(e) => setCode(e.target.value)} />
           </Field>
+          {(noBarcode || printType === "CODE128") && item.name && (
+            <div className="inline-note" style={{ marginTop: 0 }}>
+              <Icon name="alert" size={15} />
+              <span>
+                {noBarcode
+                  ? <>This product has no barcode yet, so the label would carry its item code as text — scanning it reads “{item.code}” back.</>
+                  : <>This value isn’t a valid {wantType === "EAN8" ? "EAN-8" : wantType}, so it prints as Code 128 text.</>}
+                {" "}
+                <button className="link" onClick={makeBarcode}>Give it an EAN-8 now</button>
+              </span>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10 }}>
             <Field label="Rows"><input type="number" min="1" value={rows} onChange={num(rows, setRows)} /></Field>
             <Field label="Columns"><input type="number" min="1" value={cols} onChange={num(cols, setCols)} /></Field>
