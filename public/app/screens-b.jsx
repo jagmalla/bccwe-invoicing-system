@@ -94,6 +94,78 @@ function EditCell({ canEdit, value, display, title, onSave, allowNeg, integer })
   );
 }
 
+/* Double-click a product's category to change it in place, rather than opening
+   the whole edit form for one field. Sub-categories come from the chosen
+   category, so the pair can never end up mismatched. */
+function CatEditCell({ item, canEdit, onSave, asTag }) {
+  const D = BCCWE;
+  const tree = Array.isArray(D.catTree) ? D.catTree : (D.categories || []).map((n) => ({ name: n, subs: [] }));
+  const [editing, setEditing] = useState(false);
+  const [cat, setCat] = useState(item.cat || "");
+  const [sub, setSub] = useState(item.subcat || "");
+  const boxRef = useRef(null);
+  const firstRef = useRef(null);
+  useEffect(() => { if (editing && firstRef.current) firstRef.current.focus(); }, [editing]);
+
+  const label = item.cat
+    ? item.cat + (item.subcat ? " › " + item.subcat : "")
+    : "Uncategorized";
+  const shown = asTag
+    ? <em className="cat-tag">{label}</em>
+    : <span className={item.cat ? "" : "muted"}>{label}</span>;
+  if (!canEdit) return shown;
+
+  const subsOf = (name) => {
+    const c = tree.find((x) => x.name === name);
+    return (c && Array.isArray(c.subs)) ? c.subs : [];
+  };
+  function begin() {
+    setCat(item.cat || "");
+    setSub(item.subcat || "");
+    setEditing(true);
+  }
+  function commit(nextCat, nextSub) {
+    setEditing(false);
+    const c = nextCat != null ? nextCat : cat;
+    const s = nextSub != null ? nextSub : sub;
+    if ((c || "") === (item.cat || "") && (s || "") === (item.subcat || "")) return; // unchanged
+    onSave(c, s);
+  }
+  // Leaving the control entirely saves; moving between the two selects does not.
+  function onBlur(e) {
+    if (boxRef.current && e.relatedTarget && boxRef.current.contains(e.relatedTarget)) return;
+    commit();
+  }
+  if (!editing) {
+    return (
+      <span className="editcell" title="Double-click to change the category" onDoubleClick={begin}>
+        {shown}
+      </span>
+    );
+  }
+  const subs = subsOf(cat);
+  return (
+    <span className="cat-edit" ref={boxRef} onBlur={onBlur}
+      onKeyDown={(e) => { if (e.key === "Escape") setEditing(false); else if (e.key === "Enter") commit(); }}>
+      <select ref={firstRef} value={cat} onChange={(e) => {
+        const v = e.target.value;
+        setCat(v);
+        setSub("");                       // a sub-category never survives its parent changing
+        if (!subsOf(v).length) commit(v, "");   // nothing more to pick — save straight away
+      }}>
+        <option value="">Uncategorized</option>
+        {tree.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+      </select>
+      {!!subs.length && (
+        <select value={sub} onChange={(e) => { setSub(e.target.value); commit(cat, e.target.value); }}>
+          <option value="">— no sub-category —</option>
+          {subs.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      )}
+    </span>
+  );
+}
+
 // Restricted product list for client logins: name + their reference price only.
 // No cost, supplier, stock, margin or other sensitive data.
 function ClientCatalog() {
@@ -290,6 +362,21 @@ function Inventory({ go, pushToast, initTab }) {
       label + " " + item.code + " " + show(old) + " → " + show(v) + " (quick edit)");
     if (window.persist) window.persist("inventory");
     pushToast && pushToast(item.code + " " + label.toLowerCase() + " " + show(old) + " → " + show(v));
+    bump();
+  }
+
+  // Quick category change from the list. Stored as cat + subcat together so the
+  // pair always matches; an unknown category is added to the tree rather than
+  // left dangling on the product.
+  function inlineCategory(item, cat, sub) {
+    const was = (item.cat || "Uncategorized") + (item.subcat ? " › " + item.subcat : "");
+    item.cat = cat || "";
+    item.subcat = sub || "";
+    const now = (item.cat || "Uncategorized") + (item.subcat ? " › " + item.subcat : "");
+    window.logAudit("UPDATE", "Product", "inventory_items", item.code,
+      "Category " + item.code + " " + was + " → " + now + " (quick edit)");
+    if (window.persist) window.persist("inventory");
+    pushToast && pushToast(item.code + " → " + now);
     bump();
   }
 
@@ -711,8 +798,15 @@ function Inventory({ go, pushToast, initTab }) {
                   switch (key) {
                     case "code": return <td key={key} className="mono strong">{i.code}</td>;
                     case "barcode": return <td key={key} className="mono muted">{i.barcode || <em className="muted">—</em>}</td>;
-                    case "name": return <td key={key}>{i.name}{!invColOn("cat") && <em className="cat-tag">{i.cat}</em>}</td>;
-                    case "cat": return <td key={key} className="muted">{i.cat}{i.subcat ? " › " + i.subcat : ""}</td>;
+                    // With no Category column showing, the tag under the name is
+                    // where the category lives — so that is what you double-click.
+                    case "name": return <td key={key}>{i.name}{!invColOn("cat") && (
+                      <CatEditCell item={i} canEdit={_canInlineEdit} asTag
+                        onSave={(c, s) => inlineCategory(i, c, s)} />
+                    )}</td>;
+                    case "cat": return <td key={key} className="muted">
+                      <CatEditCell item={i} canEdit={_canInlineEdit} onSave={(c, s) => inlineCategory(i, c, s)} />
+                    </td>;
                     case "supplier": return <td key={key} className="muted">{supplierName(i.supplier) || "—"}</td>;
                     case "store": return <td key={key} className="muted">{i.store || "All stores"}</td>;
                     case "avgCost": return <td key={key} className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(ac.avg)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>;

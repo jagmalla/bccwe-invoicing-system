@@ -1036,6 +1036,60 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testInlineCategory() {
+  section("Inline category edit (double-click in the stock list)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+
+  // The save path: cat and subcat are written together, so the two can never
+  // drift apart, and the audit line records both.
+  const m = /function\s+inlineCategory\s*\(/.exec(src);
+  let i = src.indexOf("{", m.index), d = 0, e = -1;
+  for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+  const fn = src.slice(m.index, e);
+  const audits = [], toasts = [];
+  const run = new Function("window", "BCCWE", "pushToast", "bump", "fmt",
+    fn + "\nreturn inlineCategory;")(
+    { logAudit: (...a) => audits.push(a), persist: () => {} },
+    {}, (t) => toasts.push(t), () => {}, (n) => String(n));
+
+  let it = { code: "P1", cat: "Phone", subcat: "Screens" };
+  run(it, "Laptop", "");
+  ok(it.cat === "Laptop" && it.subcat === "",
+    "changing the category clears a sub-category that belonged to the old one");
+  ok(/Phone › Screens → Laptop/.test(audits[0][4]), "the audit line records what it was and what it became");
+
+  it = { code: "P2", cat: "", subcat: "" };
+  run(it, "Part", "Battery");
+  ok(it.cat === "Part" && it.subcat === "Battery", "a category and sub-category are set together");
+  ok(/Uncategorized → Part › Battery/.test(audits[1][4]), "an empty category reads as Uncategorized in the log, not blank");
+
+  it = { code: "P3", cat: "Part", subcat: "Battery" };
+  run(it, "", "");
+  ok(it.cat === "" && it.subcat === "", "a product can be put back to uncategorized");
+
+  // The picker itself: sub-options must come from the chosen category.
+  const c = /function\s+CatEditCell\s*\(/.exec(src);
+  // Its parameters are destructured, so the first "{" is the parameter list —
+  // the body starts after the ")" that closes it.
+  let pd = 0, close = -1;
+  for (let k = src.indexOf("(", c.index); k < src.length; k++) {
+    if (src[k] === "(") pd++; else if (src[k] === ")") { pd--; if (!pd) { close = k; break; } }
+  }
+  let ci = src.indexOf("{", close), cd = 0, ce = -1;
+  for (let k = ci; k < src.length; k++) { if (src[k] === "{") cd++; else if (src[k] === "}") { cd--; if (!cd) { ce = k + 1; break; } } }
+  const cell = src.slice(c.index, ce);
+  ok(/setSub\(""\);/.test(cell) && /a sub-category never survives its parent changing/.test(cell),
+    "picking a new category resets the sub-category in the editor too, not just on save");
+  ok(/if \(!subsOf\(v\)\.length\) commit\(v, ""\);/.test(cell),
+    "a category with no sub-categories saves on the spot instead of waiting for a second pick");
+  ok(/boxRef\.current\.contains\(e\.relatedTarget\)/.test(cell),
+    "moving between the two selects does not count as leaving, so a half-made choice is not saved early");
+  ok(/if \(\(c \|\| ""\) === \(item\.cat \|\| ""\) && \(s \|\| ""\) === \(item\.subcat \|\| ""\)\) return;/.test(cell),
+    "re-picking the same category saves nothing — no pointless audit entry or write");
+  ok(/if \(!canEdit\) return shown;/.test(cell),
+    "a user without edit rights sees the category but cannot double-click it");
+}
+
 function testSortHeaders() {
   section("Sortable column headers");
   // Match whichever bracket opens the literal — HIST_COLUMNS is an array, the
@@ -1349,6 +1403,7 @@ function testHistorySettings() {
     testSalesAssign();
     testNavColours();
     testSortHeaders();
+    testInlineCategory();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);
