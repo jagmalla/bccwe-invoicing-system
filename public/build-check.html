@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BCCWE — build check</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f6f4f1; color: #1e2733;
+         margin: 0; padding: 28px 18px; }
+  .box { max-width: 720px; margin: 0 auto; background: #fff; border: 1px solid #e6eaf0;
+         border-radius: 12px; padding: 24px 26px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #5a6877; font-size: 13px; margin: 0 0 20px; }
+  .row { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #eef1f5;
+         align-items: flex-start; font-size: 14px; }
+  .row b { flex: 1; font-weight: 600; }
+  .v { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; text-align: right;
+       max-width: 300px; word-break: break-word; }
+  .ok { color: #14855f; } .bad { color: #d8453f; } .wait { color: #8a94a3; }
+  .verdict { margin-top: 20px; padding: 14px 16px; border-radius: 9px; font-size: 14px; line-height: 1.5; }
+  .verdict.good { background: #e5f6ef; color: #0f6b4d; }
+  .verdict.fail { background: #fbe7e6; color: #a5322d; }
+  .verdict.wait { background: #f1f3f6; color: #5a6877; }
+  code { background: #f1f3f6; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head><body>
+<div class="box">
+  <h1>BCCWE build check</h1>
+  <p class="sub">Reads the files straight off the server with caching switched off, so it shows what is
+    really uploaded — not what your browser remembers.</p>
+  <div class="row"><b>Expected build</b><span class="v">20260816c</span></div>
+  <div class="row"><b>index.html on the server</b><span class="v wait" id="r-idx">checking…</span></div>
+  <div class="row"><b>app/ files it asks for</b><span class="v wait" id="r-cnt">checking…</span></div>
+  <div class="row"><b>screens-b.jsx — Settings button</b><span class="v wait" id="r-btn">checking…</span></div>
+  <div class="row"><b>screens-b.jsx — settings panel</b><span class="v wait" id="r-mod">checking…</span></div>
+  <div class="row"><b>screens-barcodes.jsx — label fix</b><span class="v wait" id="r-bc">checking…</span></div>
+  <div class="row"><b>styles.css — settings styles</b><span class="v wait" id="r-css">checking…</span></div>
+  <div class="verdict wait" id="verdict">Running checks…</div>
+</div>
+<script>
+(function () {
+  var EXPECT = "20260816c";
+  var bust = "?nocache=" + Date.now();
+  function set(id, text, cls) {
+    var el = document.getElementById(id);
+    el.textContent = text; el.className = "v " + (cls || "");
+  }
+  function grab(path) {
+    return fetch(path + bust, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.text();
+    });
+  }
+  var results = {};
+  function finish() {
+    if (Object.keys(results).length < 4) return; // four files are checked
+    var v = document.getElementById("verdict");
+    var bad = Object.keys(results).filter(function (k) { return !results[k]; });
+    if (!bad.length) {
+      v.className = "verdict good";
+      v.innerHTML = "<b>Upload is complete and correct.</b><br>Every file on the server is build " + EXPECT +
+        ". If you still do not see the Settings button, it is your browser holding an old copy — " +
+        "press <code>Ctrl+Shift+R</code>, or open the site in a private/incognito window.";
+    } else {
+      v.className = "verdict fail";
+      v.innerHTML = "<b>The upload is not complete.</b><br>Not yet updated on the server: <b>" +
+        bad.join(", ") + "</b>.<br>Re-upload <code>index.html</code> and every file inside the " +
+        "<code>app</code> folder, overwriting what is there. Make sure they land in the same folder " +
+        "this page is in — not in a new sub-folder.";
+    }
+  }
+  grab("index.html").then(function (t) {
+    var m = t.match(/styles\.css\?v=([0-9a-z]+)/);
+    var got = m ? m[1] : "no version stamp";
+    var okv = got === EXPECT;
+    set("r-idx", got, okv ? "ok" : "bad");
+    var n = (t.match(/\?v=/g) || []).length;
+    set("r-cnt", n + " of 19", n === 19 ? "ok" : "bad");
+    results["index.html"] = okv && n === 19;
+    finish();
+  }).catch(function (e) {
+    set("r-idx", "could not read (" + e.message + ")", "bad");
+    set("r-cnt", "—", "bad"); results["index.html"] = false; finish();
+  });
+  grab("app/screens-b.jsx").then(function (t) {
+    var hasBtn = t.indexOf(">Settings</Btn>") >= 0;
+    var hasMod = t.indexOf("function InventorySettingsModal") >= 0;
+    set("r-btn", hasBtn ? "present" : "MISSING — old file", hasBtn ? "ok" : "bad");
+    set("r-mod", hasMod ? "present" : "MISSING — old file", hasMod ? "ok" : "bad");
+    results["app/screens-b.jsx"] = hasBtn && hasMod;
+    finish();
+  }).catch(function (e) {
+    set("r-btn", "could not read (" + e.message + ")", "bad");
+    set("r-mod", "—", "bad"); results["app/screens-b.jsx"] = false; finish();
+  });
+  grab("app/screens-barcodes.jsx").then(function (t) {
+    var okf = t.indexOf("D.prefs.barcode || {}") >= 0;
+    set("r-bc", okf ? "present" : "MISSING — old file", okf ? "ok" : "bad");
+    results["app/screens-barcodes.jsx"] = okf; finish();
+  }).catch(function (e) {
+    set("r-bc", "could not read (" + e.message + ")", "bad");
+    results["app/screens-barcodes.jsx"] = false; finish();
+  });
+  grab("app/styles.css").then(function (t) {
+    var okc = t.indexOf(".set-cols") >= 0;
+    set("r-css", okc ? "present" : "MISSING — old file", okc ? "ok" : "bad");
+    results["app/styles.css"] = okc; finish();
+  }).catch(function (e) {
+    set("r-css", "could not read (" + e.message + ")", "bad");
+    results["app/styles.css"] = false; finish();
+  });
+})();
+</script>
+</body></html>
