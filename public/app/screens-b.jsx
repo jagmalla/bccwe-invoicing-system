@@ -137,6 +137,47 @@ function ClientCatalog() {
   );
 }
 
+/* ---------------- Inventory view settings ----------------
+   Which columns the stock list shows, how the list behaves, and the defaults
+   for barcode labels. Stored in prefs so every screen and device agrees. */
+var INV_COLUMNS = [
+  { key: "code", label: "Item code", always: true },
+  { key: "barcode", label: "Barcode" },
+  { key: "name", label: "Description", always: true },
+  { key: "cat", label: "Category (own column)" },
+  { key: "supplier", label: "Supplier" },
+  { key: "store", label: "Store" },
+  { key: "avgCost", label: "Avg. cost" },
+  { key: "lastCost", label: "Last cost" },
+  { key: "price", label: "Price" },
+  { key: "margin", label: "Margin" },
+  { key: "stock", label: "Stock" },
+  { key: "bonus", label: "Bonus stock" },
+  { key: "alert", label: "Stock alert level" },
+  { key: "stockValue", label: "Stock value (at cost)" },
+  { key: "retailValue", label: "Retail value" },
+  { key: "purchased", label: "Purchased" },
+  { key: "movement", label: "Movement" },
+  { key: "status", label: "Status" },
+];
+var INV_DEFAULT_COLS = { code: 1, name: 1, avgCost: 1, lastCost: 1, price: 1, margin: 1, stock: 1, purchased: 1, movement: 1, status: 1 };
+function invSettings() {
+  var p = (BCCWE.prefs && BCCWE.prefs.invView) || {};
+  return {
+    cols: p.cols || INV_DEFAULT_COLS,
+    hideZero: !!p.hideZero,
+    flagNegative: p.flagNegative !== false,
+    pageSize: p.pageSize || 25,
+    density: p.density || "normal",
+  };
+}
+function invColOn(key) {
+  var s = invSettings();
+  var def = INV_COLUMNS.filter(function (c) { return c.key === key; })[0];
+  if (def && def.always) return true;
+  return !!s.cols[key];
+}
+
 function Inventory({ go, pushToast, initTab }) {
   if (window.isClientUser && window.isClientUser()) return <ClientCatalog />;
   const D = BCCWE;
@@ -151,12 +192,16 @@ function Inventory({ go, pushToast, initTab }) {
   const [, setRev] = useState(0);
   const bump = () => setRev((r) => r + 1);
 
-  // modal: { type: 'add'|'edit'|'view'|'delete'|'import'|'purchase', item? }
+  // modal: { type: 'add'|'edit'|'view'|'delete'|'import'|'purchase'|'settings', item? }
   const [modal, setModal] = useState(null);
   const close = () => setModal(null);
+  // View settings (columns, density, filters) — re-read on every render so the
+  // list updates the moment they are saved.
+  const _invSet = invSettings();
+  const _shownCols = INV_COLUMNS.filter((c) => c.always || _invSet.cols[c.key]);
 
   // pagination
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize, setPageSize] = useState(() => invSettings().pageSize);
   const [page, setPage] = useState(0);
 
   const invtSorts = {
@@ -181,9 +226,11 @@ function Inventory({ go, pushToast, initTab }) {
     if (moveFilter === "Dead") return st === "dead";
     return window.STOCK.movement(i).label === moveFilter;
   };
+  // Search also matches the barcode, so a scanner finds the item here too.
   const rows = applySort(D.inventory.filter((i) =>
     (cat === "All" || i.cat === cat) && moveOk(i) &&
-    (!q || (i.name + i.code).toLowerCase().includes(q.toLowerCase()))), sort, invtSorts);
+    (!_invSet.hideZero || (i.stock || 0) !== 0 || i.kind === "Service") &&
+    (!q || (i.name + i.code + " " + (i.barcode || "")).toLowerCase().includes(q.toLowerCase()))), sort, invtSorts);
 
   const per = pageSize === "All" ? rows.length || 1 : pageSize;
   const pages = Math.max(1, Math.ceil(rows.length / per));
@@ -574,6 +621,7 @@ function Inventory({ go, pushToast, initTab }) {
       })() : (
       <PageHead title="Inventory" sub={D.inventory.length + " items · " + fmt(stockValue) + " at cost · " + lowCount + " low"}
         actions={<>
+          <Btn variant="ghost" icon="settings" onClick={() => setModal({ type: "settings" })}>Settings</Btn>
           <Btn variant="ghost" icon="receipt" onClick={() => setModal({ type: "barcodes" })}>Print barcodes</Btn>
           <Btn variant="ghost" icon="download" onClick={() => setModal({ type: "import" })}>Import CSV</Btn>
           <Btn variant="ghost" icon="download" onClick={exportInventory}>Export</Btn>
@@ -607,31 +655,53 @@ function Inventory({ go, pushToast, initTab }) {
             <div className="seg-filters move-filters">{["All", "Fast", "Steady", "Slow", "Not moving", "Dead"].map((mf) => <button key={mf} className={"chip" + (moveFilter === mf ? " on" : "")} onClick={() => { setMoveFilter(mf); resetPage(); }}>{mf}</button>)}</div>
             <SortControl sort={sort} setSort={(v) => { setSort(v); resetPage(); }} defs={invtSorts} />
           </div>
-          <table className="data-table">
-            <thead><tr><th>Item code</th><th>Description</th><th className="r">Avg. cost</th><th className="r">Last cost</th><th className="r">Price</th><th className="r">Margin</th><th className="r">Stock</th><th>Purchased</th><th>Movement</th><th>Status</th><th /></tr></thead>
+          <table className={"data-table" + (_invSet.density === "compact" ? " tight" : "")}>
+            <thead><tr>
+              {_shownCols.map((c) => <th key={c.key} className={["avgCost", "lastCost", "price", "margin", "stock", "bonus", "alert", "stockValue", "retailValue"].includes(c.key) ? "r" : ""}>{c.short || c.label}</th>)}
+              <th />
+            </tr></thead>
             <tbody>
               {slice.map((i) => {
                 const low = i.kind !== "Service" && (i.alert || 0) > 0 && i.stock <= i.alert;
                 const margin = i.price - i.cost;
                 const mpct = i.price ? Math.round((margin / i.price) * 100) : 0;
                 const st = window.STOCK.state(i);
+                const ac = itemAvgCost(i);
+                const neg = _invSet.flagNegative && (i.stock || 0) < 0 && i.kind !== "Service";
+                const cell = (key) => {
+                  switch (key) {
+                    case "code": return <td key={key} className="mono strong">{i.code}</td>;
+                    case "barcode": return <td key={key} className="mono muted">{i.barcode || <em className="muted">—</em>}</td>;
+                    case "name": return <td key={key}>{i.name}{!invColOn("cat") && <em className="cat-tag">{i.cat}</em>}</td>;
+                    case "cat": return <td key={key} className="muted">{i.cat}{i.subcat ? " › " + i.subcat : ""}</td>;
+                    case "supplier": return <td key={key} className="muted">{supplierName(i.supplier) || "—"}</td>;
+                    case "store": return <td key={key} className="muted">{i.store || "All stores"}</td>;
+                    case "avgCost": return <td key={key} className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(ac.avg)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>;
+                    case "lastCost": return <td key={key} className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(ac.last)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>;
+                    case "price": return <td key={key} className="r mono"><EditCell canEdit={_canInlineEdit} value={i.price} display={fmt(i.price)} title="Double-click to edit price" onSave={(v) => inlineUpdate(i, "price", v)} /></td>;
+                    case "margin": return <td key={key} className="r mono"><span className={margin < 0 ? "neg" : "pos"}>{fmt(margin)}</span> <em className="mpct">{mpct}%</em></td>;
+                    case "stock": return <td key={key} className={"r mono strong" + (neg ? " neg" : "")}><EditCell canEdit={_canInlineEdit && i.kind !== "Service"} value={i.stock} display={i.stock} title="Double-click to edit stock" onSave={(v) => inlineUpdate(i, "stock", v)} allowNeg integer /></td>;
+                    case "bonus": return <td key={key} className="r mono">{i.bonus || 0}</td>;
+                    case "alert": return <td key={key} className="r mono">{i.alert || 0}</td>;
+                    case "stockValue": return <td key={key} className="r mono">{fmt((i.stock || 0) * (ac.avg || 0))}</td>;
+                    case "retailValue": return <td key={key} className="r mono">{fmt((i.stock || 0) * (i.price || 0))}</td>;
+                    case "purchased": return <td key={key}><AgeCell item={i} /></td>;
+                    case "movement": return <td key={key}><MoveBadge item={i} /></td>;
+                    case "status": return (
+                      <td key={key} className="stk-status">
+                        {low && <Badge tone="red" dot>Low</Badge>}
+                        {neg && <Badge tone="red" dot>Negative</Badge>}
+                        {st === "notmoving" && <Badge tone="amber" dot>Not moving</Badge>}
+                        {st === "dead" && <Badge tone="red" dot>Dead</Badge>}
+                        {!low && !neg && st === "active" && <Badge tone="green" dot>In stock</Badge>}
+                      </td>
+                    );
+                    default: return null;
+                  }
+                };
                 return (
-                  <tr key={i.code} className={st === "dead" ? "row-dead" : st === "notmoving" ? "row-aging" : ""}>
-                    <td className="mono strong">{i.code}</td>
-                    <td>{i.name}<em className="cat-tag">{i.cat}</em></td>
-                    <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(itemAvgCost(i).avg)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>
-                    <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.cost} display={fmt(itemAvgCost(i).last)} title="Double-click to edit cost" onSave={(v) => inlineUpdate(i, "cost", v)} /></td>
-                    <td className="r mono"><EditCell canEdit={_canInlineEdit} value={i.price} display={fmt(i.price)} title="Double-click to edit price" onSave={(v) => inlineUpdate(i, "price", v)} /></td>
-                    <td className="r mono"><span className="pos">{fmt(margin)}</span> <em className="mpct">{mpct}%</em></td>
-                    <td className="r mono strong"><EditCell canEdit={_canInlineEdit && i.kind !== "Service"} value={i.stock} display={i.stock} title="Double-click to edit stock" onSave={(v) => inlineUpdate(i, "stock", v)} allowNeg integer /></td>
-                    <td><AgeCell item={i} /></td>
-                    <td><MoveBadge item={i} /></td>
-                    <td className="stk-status">
-                      {low && <Badge tone="red" dot>Low</Badge>}
-                      {st === "notmoving" && <Badge tone="amber" dot>Not moving</Badge>}
-                      {st === "dead" && <Badge tone="red" dot>Dead</Badge>}
-                      {!low && st === "active" && <Badge tone="green" dot>In stock</Badge>}
-                    </td>
+                  <tr key={i.code} className={(st === "dead" ? "row-dead" : st === "notmoving" ? "row-aging" : "") + (neg ? " row-neg" : "")}>
+                    {_shownCols.map((c) => cell(c.key))}
                     <td className="row-acts">
                       <button className="icon-btn" title="View details" onClick={() => setModal({ type: "view", item: i })}><Icon name="eye" size={15} /></button>
                       <button className="icon-btn" title="Print barcode" onClick={() => setModal({ type: "barcodes", code: i.code })}><Icon name="receipt" size={15} /></button>
@@ -641,7 +711,7 @@ function Inventory({ go, pushToast, initTab }) {
                   </tr>
                 );
               })}
-              {!slice.length && <tr><td colSpan="11"><Empty icon="box" text="No items match your search" /></td></tr>}
+              {!slice.length && <tr><td colSpan={_shownCols.length + 1}><Empty icon="box" text="No items match your search" /></td></tr>}
             </tbody>
           </table>
           <div className="table-foot">
@@ -841,6 +911,8 @@ function Inventory({ go, pushToast, initTab }) {
           </Modal>
         );
       })()}
+      {(modal && modal.type === "settings") && <InventorySettingsModal pushToast={pushToast} onClose={close}
+        onSaved={() => { setPageSize(invSettings().pageSize); resetPage(); bump(); }} />}
       {(modal && modal.type === "import") && <ImportModal {...importCfg} pushToast={pushToast} onClose={close} />}
       {(modal && modal.type === "barcodes") && <BarcodeModal items={D.inventory} initialCode={modal.code} pushToast={pushToast} onClose={close} />}
     </div>
@@ -1002,6 +1074,119 @@ function gen8Code() {
   return String(Date.now()).slice(-8);
 }
 
+/* ---------------- Inventory settings ----------------
+   Everything about HOW inventory is shown and how labels print, in one place. */
+function InventorySettingsModal({ pushToast, onClose, onSaved }) {
+  const D = BCCWE;
+  if (!D.prefs) D.prefs = {};
+  const cur = invSettings();
+  const bc = (D.prefs && D.prefs.barcode) || {};
+  const [cols, setCols] = useState(() => Object.assign({}, cur.cols));
+  const [hideZero, setHideZero] = useState(cur.hideZero);
+  const [flagNegative, setFlagNegative] = useState(cur.flagNegative);
+  const [pageSize, setPageSize] = useState(cur.pageSize);
+  const [density, setDensity] = useState(cur.density);
+  // Barcode label defaults
+  const [showName, setShowName] = useState(bc.showName !== false);
+  const [showPrice, setShowPrice] = useState(bc.showPrice !== false);
+  const [showNumber, setShowNumber] = useState(bc.showNumber !== false);
+  const [defType, setDefType] = useState(bc.defaultType || "EAN8");
+  const [rows, setRows] = useState(bc.rows || 10);
+  const [cols2, setCols2] = useState(bc.cols || 3);
+  const [labelH, setLabelH] = useState(bc.labelH || 25);
+
+  const toggle = (k) => setCols((c) => Object.assign({}, c, { [k]: !c[k] }));
+  const onCount = INV_COLUMNS.filter((c) => c.always || cols[c.key]).length;
+
+  function save() {
+    D.prefs.invView = { cols: cols, hideZero: hideZero, flagNegative: flagNegative, pageSize: pageSize, density: density };
+    D.prefs.barcode = Object.assign({}, bc, {
+      showName: showName, showPrice: showPrice, showNumber: showNumber, defaultType: defType,
+      rows: +rows || 10, cols: +cols2 || 3, labelH: +labelH || 25,
+    });
+    if (window.persist) window.persist("prefs");
+    window.logAudit && window.logAudit("UPDATE", "Settings", "prefs", "inventory", "Updated inventory view and barcode label settings");
+    pushToast && pushToast("Inventory settings saved");
+    onSaved && onSaved();
+    onClose();
+  }
+  function resetCols() { setCols(Object.assign({}, INV_DEFAULT_COLS)); }
+
+  return (
+    <Modal title="Inventory settings" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" onClick={save}>Save settings</Btn>
+      </>}>
+      <h5 className="iv-sec" style={{ marginTop: 0 }}>Columns in the stock list <em className="muted" style={{ fontWeight: 400 }}>· {onCount} shown</em></h5>
+      <p className="rail-note" style={{ marginBottom: 10 }}>
+        Tick what you want to see. Item code and Description always stay on.
+        <button className="link" style={{ marginLeft: 8 }} onClick={resetCols}>Reset to default</button>
+      </p>
+      <div className="set-cols">
+        {INV_COLUMNS.map((c) => (
+          <label key={c.key} className="email-pick" style={{ opacity: c.always ? .6 : 1 }}>
+            <input type="checkbox" checked={!!(c.always || cols[c.key])} disabled={c.always} onChange={() => toggle(c.key)} />
+            <span>{c.label}</span>
+          </label>
+        ))}
+      </div>
+      <div className="inline-note" style={{ marginTop: 4 }}>
+        <Icon name="alert" size={15} /> Stock is shared across all stores in this system — one pool, not a count per store.
+        The Store column shows the label you set on a product, so you can mark where an item lives; it doesn't split the stock.
+      </div>
+
+      <h5 className="iv-sec">List behaviour</h5>
+      <div className="meta-grid">
+        <Field label="Rows per page">
+          <select value={String(pageSize)} onChange={(e) => setPageSize(e.target.value === "All" ? "All" : +e.target.value)}>
+            {[10, 25, 50, 100, "All"].map((s) => <option key={String(s)} value={String(s)}>{s}</option>)}
+          </select>
+        </Field>
+        <Field label="Row height">
+          <select value={density} onChange={(e) => setDensity(e.target.value)}>
+            <option value="normal">Normal</option>
+            <option value="compact">Compact — more rows on screen</option>
+          </select>
+        </Field>
+      </div>
+      <label className="email-pick" style={{ marginTop: 8 }}>
+        <input type="checkbox" checked={hideZero} onChange={() => setHideZero((v) => !v)} />
+        <span>Hide items with zero stock</span>
+      </label>
+      <label className="email-pick">
+        <input type="checkbox" checked={flagNegative} onChange={() => setFlagNegative((v) => !v)} />
+        <span>Highlight negative stock in red (oversold items that need a count)</span>
+      </label>
+
+      <h5 className="iv-sec">Barcode labels</h5>
+      <p className="rail-note" style={{ marginBottom: 10 }}>Defaults for every label you print. The print dialog can still override them for one run.</p>
+      <label className="email-pick">
+        <input type="checkbox" checked={showName} onChange={() => setShowName((v) => !v)} />
+        <span>Show the product name under the barcode</span>
+      </label>
+      <label className="email-pick">
+        <input type="checkbox" checked={showPrice} onChange={() => setShowPrice((v) => !v)} />
+        <span>Show the price under the barcode</span>
+      </label>
+      <label className="email-pick">
+        <input type="checkbox" checked={showNumber} onChange={() => setShowNumber((v) => !v)} />
+        <span>Show the barcode number itself under the bars</span>
+      </label>
+      <div className="meta-grid" style={{ marginTop: 10 }}>
+        <Field label="Barcode type for new products" hint="EAN-8 is the 8-digit standard this system generates">
+          <select value={defType} onChange={(e) => setDefType(e.target.value)}>
+            {BARCODE_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Label sheet — rows"><input type="number" min="1" value={rows} onChange={(e) => setRows(Math.max(1, parseInt(e.target.value, 10) || 1))} /></Field>
+        <Field label="Label sheet — columns"><input type="number" min="1" value={cols2} onChange={(e) => setCols2(Math.max(1, parseInt(e.target.value, 10) || 1))} /></Field>
+        <Field label="Label height (mm)"><input type="number" min="10" value={labelH} onChange={(e) => setLabelH(Math.max(10, parseInt(e.target.value, 10) || 10))} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
 /* ---------------- Inventory — categories & sub-categories ---------------- */
 function CategoriesPanel({ pushToast }) {
   const D = BCCWE;
@@ -1133,7 +1318,9 @@ function ItemFormModal({ item, onSave, onClose }) {
     // A new product gets a valid in-house EAN-8 straight away; an existing one
     // keeps whatever it has (and can be given the manufacturer's own barcode).
     barcode: item ? (item.barcode || "") : genEan8(),
-    barcodeType: item ? (item.barcodeType || (item.barcode ? barcodeTypeOf(item) : "EAN8")) : "EAN8",
+    barcodeType: item ? (item.barcodeType || (item.barcode ? barcodeTypeOf(item) : "EAN8"))
+      : (((D.prefs || {}).barcode || {}).defaultType || "EAN8"),
+    store: item ? (item.store || "") : "",
   }));
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const bcProblem = barcodeProblem(f.barcode, f.barcodeType);
@@ -1184,14 +1371,14 @@ function ItemFormModal({ item, onSave, onClose }) {
       cat: f.cat.trim() || "Service", subcat: f.subcat || "",
       supplier: "", cost: num(f.cost), price: num(f.price),
       stock: 0, bonus: 0, alert: 0, purchased: "",
-      barcode: String(f.barcode || "").trim(), barcodeType: f.barcodeType || "EAN8",
+      barcode: String(f.barcode || "").trim(), barcodeType: f.barcodeType || "EAN8", store: f.store || "",
     } : {
       code: f.code.trim(), name: f.name.trim(), kind: "Product",
       cat: f.cat.trim() || "Uncategorized", subcat: f.subcat || "",
       supplier: f.supplier, cost: num(f.cost), price: num(f.price),
       stock: numStock(f.stock), bonus: Math.round(num(f.bonus)), alert: Math.round(num(f.alert)),
       purchased: f.purchased || D.today,
-      barcode: String(f.barcode || "").trim(), barcodeType: f.barcodeType || "EAN8",
+      barcode: String(f.barcode || "").trim(), barcodeType: f.barcodeType || "EAN8", store: f.store || "",
     });
   }
 
@@ -1234,6 +1421,14 @@ function ItemFormModal({ item, onSave, onClose }) {
             {BARCODE_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
         </Field>
+        {invColOn("store") && (
+          <Field label="Store" hint="A label for where this item lives — stock itself is shared across stores">
+            <select value={f.store} onChange={(e) => set("store", e.target.value)}>
+              <option value="">All stores</option>
+              {((D.companies) || []).map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Category">
           <div className="input-prefix">
             <select value={f.cat} onChange={(e) => { set("cat", e.target.value); set("subcat", ""); }} style={{ flex: 1 }}>

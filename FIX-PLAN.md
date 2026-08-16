@@ -625,5 +625,34 @@ balance; ticking everything up to a statement date gives a $0.00 difference; the
 keeps the earlier lines cleared, counts nothing twice, and reconciles the account to zero. Cleared
 marks survive a reload, and editing a reconciled document releases exactly that one line.
 
+---
+
+## Inventory settings (2026-08-16)
+
+### What you can now control  *(built)*
+A **Settings** button at the top of Inventory opens one panel with three parts:
+
+- **Columns in the stock list** — 18 columns to tick: item code, barcode, description, category
+  (as its own column), supplier, store, avg. cost, last cost, price, margin, stock, bonus stock,
+  stock alert level, stock value at cost, retail value, purchased, movement, status. Item code and
+  Description can't be turned off, so a row is never anonymous. *With nothing saved the list shows
+  exactly the ten columns it always did — turning the feature on changes nothing until you choose.*
+- **List behaviour** — rows per page (10/25/50/100/All), normal or compact row height, hide
+  zero-stock items, and highlight negative stock in red.
+- **Barcode labels** — show the product name, the price, and/or the number itself under the bars;
+  the barcode type used for newly generated codes; and the label sheet's rows, columns and height.
+
+### One bug found and fixed while building it
+Two dialogs write to the same `prefs.barcode` record: this new panel and the label print dialog.
+The print dialog **replaced** the whole record when you saved a sheet layout, which would have
+silently wiped the name/price/number/type choices made here. Both now merge instead of replace,
+and the harness asserts it so it can't come back.
+
+### Notes worth stating
+- Stock is a single shared pool in this system, not a count per store. The Store column shows the
+  label you put on a product — it does not split stock. The panel says so on screen.
+- Hiding zero-stock rows deliberately keeps negative stock and services visible: a negative count
+  is an oversell that needs a count, not clutter.
+
 ### NOT audited (do not assume clean)
-- **Barcode / label printing, email/WhatsApp delivery, attachments** — untouched by this audit.
+- **Email/WhatsApp delivery, attachments** — untouched by this audit.

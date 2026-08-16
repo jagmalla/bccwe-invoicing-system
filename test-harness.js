@@ -974,6 +974,68 @@ function testBarcodes() {
   ok(!renders("12345678", "EAN8"), "the encoder itself refuses a bad check digit");
 }
 
+// ============================================================================
+// 11. Inventory view settings (columns / list behaviour)
+// ============================================================================
+function testInventorySettings() {
+  section("Inventory settings (columns, list behaviour)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+  const grab = (n) => {
+    const m = new RegExp("function\\s+" + n + "\\s*\\(").exec(src);
+    let i = src.indexOf("{", m.index), d = 0, e = -1;
+    for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return src.slice(m.index, e);
+  };
+  const grabVar = (n) => {
+    const m = new RegExp("var\\s+" + n + "\\s*=").exec(src);
+    let k = src.indexOf("=", m.index) + 1, d = 0;
+    for (; k < src.length; k++) { const c = src[k]; if ("([{".includes(c)) d++; else if (")]}".includes(c)) d--; else if (c === ";" && d === 0) { k++; break; } }
+    return src.slice(m.index, k);
+  };
+  let PREFS = {};
+  const H = new Function("BCCWE",
+    grabVar("INV_COLUMNS") + "\n" + grabVar("INV_DEFAULT_COLS") + "\n" + grab("invSettings") + "\n" + grab("invColOn") +
+    "\nreturn {INV_COLUMNS,INV_DEFAULT_COLS,invSettings,invColOn};")({ get prefs() { return PREFS; } });
+  const shownKeys = () => H.INV_COLUMNS.filter((c) => c.always || H.invSettings().cols[c.key]).map((c) => c.key);
+
+  PREFS = {};
+  ok(JSON.stringify(shownKeys()) === JSON.stringify(["code", "name", "avgCost", "lastCost", "price", "margin", "stock", "purchased", "movement", "status"]),
+    "with nothing saved, the columns match the existing table exactly (no surprise change)");
+  ok(H.invSettings().pageSize === 25 && H.invSettings().flagNegative === true && H.invSettings().hideZero === false,
+    "default list behaviour: 25 per page, negatives flagged, nothing hidden");
+
+  PREFS = { invView: { cols: {} } };
+  ok(H.invColOn("code") && H.invColOn("name"), "item code and description stay on even if every box is cleared");
+  ok(!H.invColOn("barcode"), "optional columns follow the saved setting");
+
+  PREFS = { invView: { cols: { code: 1, name: 1, barcode: 1, supplier: 1, store: 1, stockValue: 1, alert: 1 } } };
+  const k2 = shownKeys();
+  ok(k2.includes("barcode") && k2.includes("supplier") && k2.includes("store") && k2.includes("stockValue") && k2.includes("alert"),
+    "barcode, supplier, store, stock value and alert level can all be shown");
+  ok(!k2.includes("movement") && !k2.includes("margin"), "unticked columns are hidden");
+
+  PREFS = { invView: { cols: {}, hideZero: true, flagNegative: false, pageSize: 100, density: "compact" } };
+  const s = H.invSettings();
+  ok(s.hideZero === true && s.flagNegative === false && s.pageSize === 100 && s.density === "compact",
+    "hide-zero, negative flagging, page size and density all persist");
+  const items = [{ code: "A", stock: 5 }, { code: "B", stock: 0 }, { code: "C", stock: -100 }, { code: "S", stock: 0, kind: "Service" }];
+  const visible = items.filter((i) => !s.hideZero || (i.stock || 0) !== 0 || i.kind === "Service").map((i) => i.code);
+  ok(JSON.stringify(visible) === JSON.stringify(["A", "C", "S"]),
+    "hide-zero drops empty stock but keeps negatives (which need attention) and services");
+
+  // Two dialogs write prefs.barcode: Inventory > Settings (name/price/number/type)
+  // and the label print dialog (sheet layout). Neither may clobber the other's keys.
+  const bsrc = fs.readFileSync(path.join(ROOT, "public/app/screens-barcodes.jsx"), "utf8");
+  const invSave = /D\.prefs\.barcode = Object\.assign\(\{\}, bc,/.test(src);
+  const lblSave = /D\.prefs\.barcode = Object\.assign\(\{\}, D\.prefs\.barcode \|\| \{\},/.test(bsrc);
+  ok(invSave, "the inventory settings dialog merges into prefs.barcode instead of replacing it");
+  ok(lblSave, "the label print dialog merges too, so saving a sheet layout can't wipe showNumber/defaultType");
+
+  // showNumber must reach the encoder, and default to ON when never set.
+  const numOn = /displayValue: showNum/.test(bsrc) && /showNumber === false/.test(bsrc);
+  ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -987,6 +1049,7 @@ function testBarcodes() {
     testTaxSplit();
     testPurchasingAndStores();
     testBarcodes();
+    testInventorySettings();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

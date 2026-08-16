@@ -12,10 +12,13 @@ function bccweBarcodeDataUrl(code, opts) {
   var val = String(code || "00000000");
   var fmt = opts.type
     || ((/^\d{8}$/.test(val)) ? "EAN8" : (/^\d{13}$/.test(val)) ? "EAN13" : (/^\d{12}$/.test(val)) ? "UPC" : "CODE128");
+  // Whether the number is printed under the bars is an Inventory setting.
+  var showNum = opts.showNumber != null ? !!opts.showNumber
+    : !(((BCCWE.prefs || {}).barcode || {}).showNumber === false);
   try {
-    window.JsBarcode(cv, val, { format: fmt, width: 2, height: 60, fontSize: 14, margin: 6, displayValue: true });
+    window.JsBarcode(cv, val, { format: fmt, width: 2, height: 60, fontSize: 14, margin: 6, displayValue: showNum });
   } catch (e) {
-    try { window.JsBarcode(cv, val, { format: "CODE128", width: 2, height: 60, fontSize: 14, margin: 6, displayValue: true }); } catch (e2) { return ""; }
+    try { window.JsBarcode(cv, val, { format: "CODE128", width: 2, height: 60, fontSize: 14, margin: 6, displayValue: showNum }); } catch (e2) { return ""; }
   }
   return cv.toDataURL("image/png");
 }
@@ -75,7 +78,11 @@ function BarcodeModal({ items, initialCode, onClose, pushToast }) {
 
   function saveSettings() {
     if (!D.prefs) D.prefs = {};
-    D.prefs.barcode = { rows: +rows, cols: +cols, labelH: +labelH, gap: +gap, showName: showName, showPrice: showPrice };
+    // MERGE, don't replace: Inventory > Settings stores showNumber / defaultType
+    // in this same object, and overwriting it here would silently drop them.
+    D.prefs.barcode = Object.assign({}, D.prefs.barcode || {}, {
+      rows: +rows, cols: +cols, labelH: +labelH, gap: +gap, showName: showName, showPrice: showPrice,
+    });
     if (window.persist) window.persist("prefs");
     pushToast && pushToast("Barcode layout saved");
   }
