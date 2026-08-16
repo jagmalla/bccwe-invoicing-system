@@ -1036,6 +1036,62 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testCsvTemplate() {
+  section("CSV import template (round-trips through the app's own parser)");
+  const usrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
+  const grab = (n) => {
+    const m = new RegExp("function\\s+" + n + "\\s*\\(").exec(usrc);
+    let pd = 0, close = -1;
+    for (let k = usrc.indexOf("(", m.index); k < usrc.length; k++) {
+      if (usrc[k] === "(") pd++; else if (usrc[k] === ")") { pd--; if (!pd) { close = k; break; } }
+    }
+    let i = usrc.indexOf("{", close), d = 0, e = -1;
+    for (let k = i; k < usrc.length; k++) { if (usrc[k] === "{") d++; else if (usrc[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return usrc.slice(m.index, e);
+  };
+  // Pull downloadCsvTemplate out of the component, plus the real CSV reader it
+  // must feed — the template is worthless if the importer can't read it back.
+  const body = grab("ImportModal");
+  const tpl = /function downloadCsvTemplate\(\)[\s\S]*?\n  \}/.exec(body)[0];
+  let saved = null;
+  const env = new Function("columns", "sample", "entityFile", "Blob", "URL", "document", "setTimeout",
+    tpl + "\nreturn downloadCsvTemplate;");
+
+  const columns = [
+    { key: "no", label: "Invoice #", required: true },
+    { key: "client", label: "Client Name", required: true },
+    { key: "notes", label: "Notes" },
+  ];
+  const sample = [
+    { no: "INV-1", client: 'Acme, "The" Co.', notes: "line one\nline two" },   // comma, quotes, newline
+    { no: "INV-2", client: "Café Étoile", notes: "" },                          // accents
+  ];
+  const fn = env(columns, sample, "TEST",
+    function Blob(parts) { saved = parts.join(""); },
+    { createObjectURL: () => "blob:x", revokeObjectURL: () => {} },
+    { createElement: () => ({ click() {}, set href(v) {}, set download(v) {} }),
+      body: { appendChild() {}, removeChild() {} } },
+    () => {});
+  fn();
+  ok(typeof saved === "string" && saved.length > 0, "the template produces a file");
+  ok(saved.charCodeAt(0) === 0xFEFF, "it starts with a BOM so Excel keeps accented names intact");
+
+  // Now read it back with the SHIPPING parser, not a copy of one.
+  const parseSrc = /function parseCsvGrid\([\s\S]*?\n\}/.exec(usrc)[0];
+  const gridSrc = /function gridToObjects\([\s\S]*?\n\}/.exec(usrc)[0];
+  const P = new Function(parseSrc + "\n" + gridSrc + "\nreturn { parseCsvGrid, gridToObjects };")();
+  const objs = P.gridToObjects(P.parseCsvGrid(saved), columns);
+  ok(objs.length === 2, "the importer reads back exactly the rows the template wrote");
+  ok(objs[0].client === 'Acme, "The" Co.',
+    "a client name containing a comma and quotes survives the round trip");
+  ok(objs[0].notes === "line one\nline two", "a value containing a line break survives too");
+  ok(objs[1].client === "Café Étoile", "accented characters survive the BOM-prefixed file");
+
+  const header = saved.replace(/^﻿/, "").split("\n")[0];
+  ok(header === 'Invoice #,Client Name,Notes',
+    "the header row is exactly the labels the import screen lists, in order");
+}
+
 function testInlineCategory() {
   section("Inline category edit (double-click in the stock list)");
   const src = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
@@ -1404,6 +1460,7 @@ function testHistorySettings() {
     testNavColours();
     testSortHeaders();
     testInlineCategory();
+    testCsvTemplate();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

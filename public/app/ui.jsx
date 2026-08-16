@@ -577,6 +577,23 @@ function ImportModal({ title, entityFile, columns, sample, analyze, onImport, on
     exportXlsx(entityFile + "-import-template", "Template",
       columns.map((c) => ({ key: c.key, label: c.label, type: "text" })), sample);
   }
+  // The importer only accepts CSV, so offer the template in CSV too — the
+  // .xlsx one has to be re-saved before it can be uploaded back.
+  function downloadCsvTemplate() {
+    const esc = (v) => {
+      const s = String(v == null ? "" : v);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const head = columns.map((c) => esc(c.label)).join(",");
+    const body = (sample || []).map((r) => columns.map((c) => esc(r[c.key])).join(",")).join("\n");
+    // The BOM keeps accented client names intact when the file is opened in Excel.
+    const blob = new Blob(["﻿" + head + (body ? "\n" + body : "") + "\n"], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = entityFile + "-import-template.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   function handleFile(file) {
     if (!file) return;
@@ -630,7 +647,11 @@ function ImportModal({ title, entityFile, columns, sample, analyze, onImport, on
           </div>
         ))}
       </div>
-      <Btn variant="default" size="sm" icon="download" onClick={downloadTemplate}>Download sample template (.xlsx)</Btn>
+      <div className="import-tpl">
+        <Btn variant="default" size="sm" icon="download" onClick={downloadCsvTemplate}>Download template (.csv)</Btn>
+        <Btn variant="ghost" size="sm" icon="download" onClick={downloadTemplate}>.xlsx version</Btn>
+        <span className="ic-hint">The .csv one uploads back as-is; the .xlsx needs saving as CSV first.</span>
+      </div>
       <label className={"import-drop" + (dragOver ? " over" : "")}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}

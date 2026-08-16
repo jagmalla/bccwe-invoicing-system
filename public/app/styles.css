@@ -941,6 +941,9 @@ tr.recon-on { background: var(--accent-soft); }
 tr.row-neg td { background: var(--red-soft); }
 tr.row-due td { background: var(--red-soft); }
 tr.hist-tot td { border-top: 2px solid var(--line); background: var(--bg-2, #faf9f7); font-size: 13px; }
+.import-tpl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 2px; }
+.import-tpl .ic-hint { font-size: 11.5px; color: var(--ink-3); }
+
 /* Inline category picker (double-click a product's category in the stock list) */
 .cat-edit { display: inline-flex; gap: 6px; align-items: center; }
 .cat-edit select { width: auto; min-width: 128px; padding: 4px 24px 4px 8px; font-size: 12.5px;
