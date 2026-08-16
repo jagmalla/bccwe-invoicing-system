@@ -1036,6 +1036,75 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testSalesAssign() {
+  section("Bulk salesperson assignment (imported invoices)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
+  const m = /function\s+salesAssignTargets\s*\(/.exec(src);
+  let i = src.indexOf("{", m.index), d = 0, e = -1;
+  for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+  const fn = src.slice(m.index, e);
+
+  const DB = {
+    invoices: [
+      { no: "A1", date: "2026-05-10", sales: "", companyId: "s1" },      // imported, no salesperson
+      { no: "A2", date: "2026-05-11", companyId: "s1" },                 // imported, field absent entirely
+      { no: "A3", date: "2026-05-12", sales: "u_kev", companyId: "s1" },
+      { no: "A4", date: "2026-07-01", sales: "", companyId: "s2" },      // other store, other month
+    ],
+    creditNotes: [{ no: "C1", date: "2026-05-13", sales: "", companyId: "s1" }],
+    cashSales: [
+      { id: "R1", date: "2026-05-14", sales: "", companyId: "s1" },
+      { id: "R2", date: "2026-05-15", sales: "u_priya", companyId: "s1" },
+    ],
+  };
+  const BC = { get invoices() { return DB.invoices; }, get creditNotes() { return DB.creditNotes; }, get cashSales() { return DB.cashSales; } };
+  const WIN = {
+    STORES: { idOf: (r) => r.companyId || "s1" },
+  };
+  const inRange = (ds, r) => !r || (ds >= r.from && ds <= r.to);
+  const T = new Function("BCCWE", "window", "inRange", "cnStoreId",
+    fn + "\nreturn salesAssignTargets;")(BC, WIN, inRange, (c) => c.companyId || "s1");
+
+  let p = T({ scope: "none" });
+  ok(p.total === 5, "'no salesperson' finds every unassigned document across invoices, returns and register");
+  ok(p.invoices.map((r) => r.no).join(",") === "A1,A2,A4",
+    "a missing `sales` field counts as unassigned, same as an empty one");
+  ok(!p.invoices.some((r) => r.no === "A3") && !p.register.some((r) => r.id === "R2"),
+    "documents that already have a salesperson are left alone");
+
+  p = T({ scope: "none", store: "s1" });
+  ok(p.invoices.length === 2 && !p.invoices.some((r) => r.no === "A4"),
+    "limiting to a store excludes another store's documents");
+
+  p = T({ scope: "none", range: { from: "2026-05-01", to: "2026-05-31" } });
+  ok(p.total === 4 && !p.invoices.some((r) => r.no === "A4"),
+    "limiting to a period excludes documents dated outside it");
+
+  p = T({ scope: "none", kinds: { invoices: true, credits: false, register: false } });
+  ok(p.total === 3 && p.credits.length === 0 && p.register.length === 0,
+    "unticking a document type removes it from the plan entirely");
+
+  p = T({ scope: "person", fromId: "u_kev" });
+  ok(p.total === 1 && p.invoices[0].no === "A3",
+    "reassigning by person picks only that person's documents");
+
+  p = T({ scope: "all" });
+  ok(p.total === 7, "'every document' includes the ones that already have a salesperson");
+
+  // The plan must be the exact records, so applying it cannot touch anything else.
+  p = T({ scope: "none", store: "s1", range: { from: "2026-05-01", to: "2026-05-31" } });
+  const before = JSON.stringify(DB);
+  p.invoices.concat(p.credits, p.register).forEach((r) => { r.sales = "u_new"; });
+  ok(DB.invoices.find((r) => r.no === "A3").sales === "u_kev"
+    && DB.invoices.find((r) => r.no === "A4").sales === ""
+    && DB.cashSales.find((r) => r.id === "R2").sales === "u_priya",
+    "applying the plan changes only the matched records — nothing outside it moves");
+  ok(DB.invoices.find((r) => r.no === "A1").sales === "u_new"
+    && DB.creditNotes[0].sales === "u_new" && DB.cashSales[0].sales === "u_new",
+    "every matched record across all three collections does get assigned");
+  ok(before !== JSON.stringify(DB), "the plan holds live records, not copies (so the assignment sticks)");
+}
+
 function testHistorySettings() {
   section("Invoice history settings (columns, list behaviour, defaults)");
   const src = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
@@ -1163,6 +1232,7 @@ function testHistorySettings() {
     testBarcodes();
     testInventorySettings();
     testHistorySettings();
+    testSalesAssign();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

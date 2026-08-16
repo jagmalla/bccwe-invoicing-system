@@ -153,6 +153,59 @@ function SortControl({ sort, setSort, defs, label = "Sort" }) {
   );
 }
 
+/* ---------- multi-select filter dropdown ----------
+   A row of tick-boxes eats the whole toolbar once there are more than three or
+   four. This collapses them into one control that states what is selected, and
+   opens the same tick-boxes on click. `sel` is the existing array-of-strings
+   with "All" as the reset value, so callers keep their toggle logic unchanged. */
+function FilterDropdown({ icon, allLabel, options, sel, onToggle, width }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    // Close on an outside click or Escape — a filter panel left hanging over
+    // the table is worse than the row of tick-boxes it replaced.
+    const away = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", away); document.removeEventListener("keydown", esc); };
+  }, [open]);
+
+  const picked = (sel || []).filter((x) => x !== "All");
+  const isAll = !picked.length;
+  // Name what is actually selected rather than only counting it — "Unpaid +1"
+  // says more than "2 selected" in the same space.
+  const summary = isAll ? allLabel : picked[0] + (picked.length > 1 ? " +" + (picked.length - 1) : "");
+
+  return (
+    <div className={"filt-dd" + (open ? " open" : "")} ref={wrapRef}>
+      <button type="button" className={"filt-dd-btn" + (isAll ? "" : " on")}
+        aria-expanded={open} title={isAll ? allLabel : picked.join(", ")}
+        onClick={() => setOpen((v) => !v)}>
+        {icon && <Icon name={icon} size={15} />}
+        <span className="filt-dd-txt">{summary}</span>
+        <Icon name="chevron" size={14} className="filt-dd-caret" />
+      </button>
+      {open && (
+        <div className="filt-dd-panel" style={width ? { minWidth: width } : undefined}>
+          <label className={"filt-dd-opt" + (isAll ? " on" : "")}>
+            <input type="checkbox" checked={isAll} onChange={() => onToggle("All")} />
+            <span>{allLabel}</span>
+          </label>
+          <div className="filt-dd-sep" />
+          {options.map((o) => (
+            <label key={o} className={"filt-dd-opt" + (picked.includes(o) ? " on" : "")}>
+              <input type="checkbox" checked={picked.includes(o)} onChange={() => onToggle(o)} />
+              <span>{o}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- period filtering ---------- */
 /* ---------- store colours ----------
    Every store gets a colour so a combined list can be read at a glance instead

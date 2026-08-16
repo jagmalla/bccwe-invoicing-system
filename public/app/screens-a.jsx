@@ -707,6 +707,166 @@ function histOverdueDays(r) {
   return d > 0 ? d : null;
 }
 
+/* ---------------- Bulk salesperson assignment ----------------
+   Invoices imported from an older system arrive with no salesperson, and fixing
+   them one at a time is not realistic. This picks out exactly which documents a
+   bulk assignment would touch, so the count can be shown BEFORE anything moves. */
+function salesAssignTargets(opts) {
+  var D = BCCWE;
+  var o = opts || {};
+  var scope = o.scope || "none";        // "none" | "person" | "all"
+  var fromId = o.fromId || "";
+  var sf = o.store || "all";
+  var range = o.range || null;
+  var kinds = o.kinds || { invoices: true, credits: true, register: true };
+
+  function storeIdOf(r, kind) {
+    if (!window.STORES) return sf;
+    if (kind === "credits" && typeof cnStoreId === "function") return cnStoreId(r);
+    return window.STORES.idOf(r);
+  }
+  function match(r, kind) {
+    if (range && typeof inRange === "function" && !inRange(r.date, range)) return false;
+    if (sf !== "all" && storeIdOf(r, kind) !== sf) return false;
+    var cur = r.sales || "";
+    if (scope === "none") return !cur;
+    if (scope === "person") return cur === fromId;
+    return true;
+  }
+  var pick = (list, kind, on) => (on ? (list || []).filter((r) => match(r, kind)) : []);
+  var invoices = pick(D.invoices, "invoices", kinds.invoices);
+  var credits = pick(D.creditNotes, "credits", kinds.credits);
+  var register = pick(D.cashSales, "register", kinds.register);
+  return { invoices: invoices, credits: credits, register: register,
+    total: invoices.length + credits.length + register.length };
+}
+
+function SalesAssignModal({ store, range, pushToast, onClose, onDone }) {
+  const D = BCCWE;
+  const people = D.salespeople || [];
+  const [scope, setScope] = useState("none");
+  const [fromId, setFromId] = useState(people[0] ? people[0].id : "");
+  const [toId, setToId] = useState("");
+  const [kinds, setKinds] = useState({ invoices: true, credits: true, register: true });
+  const [limit, setLimit] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const plan = salesAssignTargets({
+    scope, fromId, kinds,
+    store: limit ? store : "all",
+    range: limit ? range : null,
+  });
+  const nameOf = (id) => (people.find((p) => p.id === id) || {}).name || id;
+  const toggleKind = (k) => setKinds((s) => Object.assign({}, s, { [k]: !s[k] }));
+  // Reassigning documents that already have someone is a real overwrite, so it
+  // is never the default and it says whose name is being replaced.
+  const overwrites = scope === "all";
+  const valid = !!toId && plan.total > 0 && !(scope === "person" && fromId === toId);
+
+  async function apply() {
+    if (!valid || busy) return;
+    setBusy(true);
+    const groups = [["invoices", plan.invoices], ["creditNotes", plan.credits], ["cashSales", plan.register]];
+    const undo = [];
+    groups.forEach(([, list]) => list.forEach((r) => undo.push([r, r.sales])));
+    groups.forEach(([, list]) => list.forEach((r) => { r.sales = toId; }));
+    const keys = groups.filter(([, l]) => l.length).map(([k]) => k);
+    window.logAudit && window.logAudit("UPDATE", "Invoice", "invoices", "",
+      "Assigned " + nameOf(toId) + " to " + plan.total + " document(s) in bulk"
+      + (scope === "none" ? " (had no salesperson)" : scope === "person" ? " (were " + nameOf(fromId) + ")" : ""));
+    const ok = window.persistNow ? await window.persistNow.apply(null, keys) : true;
+    if (!ok) {
+      undo.forEach(([r, v]) => { r.sales = v; });   // nothing saved, so nothing changes
+      setBusy(false);
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed.");
+      return;
+    }
+    pushToast && pushToast(plan.total + " document" + (plan.total === 1 ? "" : "s") + " assigned to " + nameOf(toId));
+    onDone && onDone();
+    onClose();
+  }
+
+  const row = (k, label, n) => (
+    <label className="email-pick">
+      <input type="checkbox" checked={kinds[k]} onChange={() => toggleKind(k)} />
+      <span>{label}</span>
+      <Badge tone={n ? "blue" : "slate"}>{n}</Badge>
+    </label>
+  );
+
+  return (
+    <Modal title="Assign a salesperson in bulk" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!valid || busy} onClick={apply}>
+          {busy ? "Saving…" : plan.total ? "Assign " + plan.total + " document" + (plan.total === 1 ? "" : "s") : "Nothing to assign"}
+        </Btn>
+      </>}>
+      <p className="rail-note" style={{ marginTop: 0 }}>
+        Built for invoices brought in from another system with no salesperson on them.
+        Nothing changes until you press the button, and the count below is exactly what will change.
+      </p>
+
+      <h5 className="iv-sec" style={{ marginTop: 16 }}>Which documents</h5>
+      <Field label="Change">
+        <select value={scope} onChange={(e) => setScope(e.target.value)}>
+          <option value="none">Documents with no salesperson (imported records)</option>
+          <option value="person">Documents currently assigned to one person</option>
+          <option value="all">Every document that matches — replaces who is on them now</option>
+        </select>
+      </Field>
+      {scope === "person" && (
+        <Field label="Currently assigned to">
+          <select value={fromId} onChange={(e) => setFromId(e.target.value)}>
+            {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+      )}
+
+      <span className="field-label" style={{ marginTop: 14, display: "block" }}>Include</span>
+      {row("invoices", "Invoices", plan.invoices.length)}
+      {row("credits", "Returns & exchanges", plan.credits.length)}
+      {row("register", "Register / POS sales", plan.register.length)}
+
+      <label className="email-pick" style={{ marginTop: 10 }}>
+        <input type="checkbox" checked={limit} onChange={() => setLimit((v) => !v)} />
+        <span>Only the period and store showing on the page{range && range.label ? " (" + range.label + ")" : ""}</span>
+      </label>
+
+      <h5 className="iv-sec">Assign to</h5>
+      <Field label="Salesperson" required>
+        <select value={toId} onChange={(e) => setToId(e.target.value)}>
+          <option value="">Choose a salesperson…</option>
+          {people.map((p) => <option key={p.id} value={p.id}>{p.name}{p.role ? " · " + p.role : ""}</option>)}
+        </select>
+      </Field>
+
+      {overwrites && plan.total > 0 && (
+        <div className="inline-note" style={{ background: "var(--red-soft)", color: "#a5322d" }}>
+          <Icon name="alert" size={15} /> This replaces the salesperson already recorded on documents that have one.
+          There is no undo — use “Documents with no salesperson” unless you mean to overwrite.
+        </div>
+      )}
+      {scope === "person" && fromId === toId && (
+        <div className="inline-note"><Icon name="alert" size={15} /> That is the same person — pick a different one to assign.</div>
+      )}
+      {!plan.total && (
+        <div className="inline-note">
+          <Icon name="alert" size={15} /> Nothing matches right now.
+          {limit ? " Try unticking the period/store limit above." : " Every document in this scope already has a salesperson."}
+        </div>
+      )}
+      {plan.total > 0 && (
+        <div className="inline-note" style={{ background: "var(--accent-soft)", color: "var(--accent-ink)" }}>
+          <Icon name="alert" size={15} /> {plan.total} document{plan.total === 1 ? "" : "s"} will be assigned
+          to {toId ? nameOf(toId) : "the salesperson you pick"} — {plan.invoices.length} invoice(s),
+          {" "}{plan.credits.length} return/exchange(s), {plan.register.length} register sale(s).
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 /* ---------------- Invoice History ---------------- */
 function InvoiceHistory({ go, pushToast, store }) {
   const D = BCCWE;
@@ -738,6 +898,7 @@ function InvoiceHistory({ go, pushToast, store }) {
   const [showImport, setShowImport] = useState(false);
   const [showTaxFix, setShowTaxFix] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAssign, setShowAssign] = useState(false);
   const [, setRev] = useState(0);
   const range = periodRange(period, from, to);
 
@@ -918,6 +1079,7 @@ function InvoiceHistory({ go, pushToast, store }) {
           <Btn variant="ghost" icon="download" onClick={() => setShowImport(true)}>Import CSV</Btn>
           <Btn variant="ghost" icon="mail" onClick={() => setShowEmail(true)}>Email</Btn>
           <Btn variant="ghost" icon="download" onClick={exportExcel}>Export Excel</Btn>
+          {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="people" onClick={() => setShowAssign(true)}>Assign salesperson</Btn>}
           {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="receipt" onClick={() => setShowTaxFix(true)}>Fix imported tax</Btn>}
           <Btn variant="primary" icon="plus" onClick={() => go("invoice")}>New invoice</Btn>
         </>} />
@@ -932,23 +1094,13 @@ function InvoiceHistory({ go, pushToast, store }) {
             <Icon name="search" size={16} />
             <input placeholder="Search # or client…" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} />
           </div>
-          <div className="check-filters">
-            {["All", "Sales", "Returns", "Exchanges"].map((t) => (
-              <label key={t} className={"check" + (txnSel.includes(t) ? " on" : "")}>
-                <input type="checkbox" checked={txnSel.includes(t)} onChange={() => toggleSel(txnSel, setTxnSel, t)} />
-                <span>{t}</span>
-              </label>
-            ))}
-          </div>
+          {/* Two dropdowns rather than nine tick-boxes, so the toolbar stays
+              on one line. The selection logic behind them is unchanged. */}
+          <FilterDropdown icon="invoice" allLabel="All types" options={["Sales", "Returns", "Exchanges"]}
+            sel={txnSel} onToggle={(v) => toggleSel(txnSel, setTxnSel, v)} />
           {(txnSel.includes("All") || txnSel.includes("Sales")) && (
-            <div className="check-filters">
-              {["All", "Unpaid", "Partially Paid", "Paid", "Overdue"].map((s) => (
-                <label key={s} className={"check" + (statusSel.includes(s) ? " on" : "")}>
-                  <input type="checkbox" checked={statusSel.includes(s)} onChange={() => toggleSel(statusSel, setStatusSel, s)} />
-                  <span>{s}</span>
-                </label>
-              ))}
-            </div>
+            <FilterDropdown icon="check" allLabel="Any status" options={["Unpaid", "Partially Paid", "Paid", "Overdue"]}
+              sel={statusSel} onToggle={(v) => toggleSel(statusSel, setStatusSel, v)} />
           )}
           <select className="tool-select" value={sales} onChange={(e) => { setSales(e.target.value); setPage(0); }}>
             <option value="All">All salespeople</option>
@@ -1070,6 +1222,10 @@ function InvoiceHistory({ go, pushToast, store }) {
             const s = histSettings();
             setPageSize(s.pageSize); setPage(0); setRev((n) => n + 1);
           }} />
+      )}
+      {showAssign && (
+        <SalesAssignModal store={sf} range={range} pushToast={pushToast}
+          onClose={() => setShowAssign(false)} onDone={() => setRev((n) => n + 1)} />
       )}
       {showImport && (
         <ImportModal {...invoiceImport} pushToast={pushToast} onClose={() => setShowImport(false)} />

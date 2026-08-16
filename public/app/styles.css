@@ -676,6 +676,8 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
 .email-pick:hover { border-color: var(--accent-line); }
 .email-pick input { width: auto; }
 .email-pick span { flex: 1; font-size: 13px; }
+/* A badge inside a pick row is a tag, not the label — it must not stretch. */
+.email-pick .badge { flex: 0 0 auto; }
 .stmt-pick-head { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
 .stmt-inv-list { border: 1px solid var(--line); border-radius: 8px; max-height: 280px; overflow: auto; }
 .stmt-inv-list table { margin: 0; }
@@ -940,6 +942,32 @@ tr.hist-tot td { border-top: 2px solid var(--line); background: var(--bg-2, #faf
 .data-table tbody tr.store-row:hover { background: inherit; filter: brightness(.975); }
 .store-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 2px; padding-left: 2px; }
 .store-legend em { font-size: 11.5px; font-style: normal; }
+/* Multi-select filter dropdown — one control instead of a row of tick-boxes. */
+.filt-dd { position: relative; }
+.filt-dd-btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 11px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface); cursor: pointer; font-size: 12.5px;
+  font-weight: 600; color: var(--ink-2); transition: all .14s; white-space: nowrap; }
+.filt-dd-btn:hover { border-color: #cfd6e0; }
+.filt-dd-btn.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-ink); }
+.filt-dd.open .filt-dd-btn { border-color: var(--accent); }
+.filt-dd-txt { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.filt-dd-caret { opacity: .55; transition: transform .14s; }
+.filt-dd.open .filt-dd-caret { transform: rotate(90deg); }
+.filt-dd-panel { position: absolute; z-index: 60; top: calc(100% + 6px); left: 0; min-width: 190px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--sh-lg); padding: 6px; }
+.filt-dd-opt { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 7px;
+  cursor: pointer; font-size: 13px; color: var(--ink-2); font-weight: 500; }
+.filt-dd-opt:hover { background: var(--surface-2); }
+.filt-dd-opt.on { color: var(--accent-ink); font-weight: 600; }
+.filt-dd-opt input { appearance: none; -webkit-appearance: none; width: 15px; height: 15px; margin: 0;
+  border: 1.5px solid #c2cad6; border-radius: 4px; background: var(--surface); cursor: pointer;
+  flex-shrink: 0; position: relative; transition: all .14s; box-shadow: none !important; }
+.filt-dd-opt input:checked { background: var(--accent); border-color: var(--accent); }
+.filt-dd-opt input:checked::after { content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.filt-dd-sep { height: 1px; background: var(--line-2); margin: 5px 4px; }
+
 .store-swatches { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .store-swatches .swatch { padding: 6px 13px; border-radius: 20px; border: 1.5px solid var(--line);
   font-size: 12px; font-weight: 600; cursor: pointer; background: var(--surface-2); color: var(--ink-2); }
