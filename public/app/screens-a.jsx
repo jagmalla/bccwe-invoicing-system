@@ -654,6 +654,58 @@ function TaxSplitModal({ store, pushToast, onClose }) {
   );
 }
 
+/* ---------------- Invoice History — view settings ----------------
+   Everything the owner can choose about how the transaction list is shown.
+   Saved under prefs.histView, so it survives a reload and follows the login. */
+var HIST_COLUMNS = [
+  { key: "doc", label: "Document #", always: true },
+  { key: "type", label: "Type" },
+  { key: "client", label: "Client", always: true },
+  { key: "date", label: "Date" },
+  { key: "due", label: "Due date", short: "Due" },
+  { key: "age", label: "Age / days overdue", short: "Age" },
+  { key: "sales", label: "Salesperson" },
+  { key: "store", label: "Store" },
+  { key: "pono", label: "P.O. / S.O. #", short: "P.O. #" },
+  { key: "subtotal", label: "Amount (before tax)", short: "Pre-tax" },
+  { key: "tax", label: "Tax charged", short: "Tax" },
+  { key: "total", label: "Total", always: true },
+  { key: "paid", label: "Paid" },
+  { key: "balance", label: "Balance" },
+  { key: "status", label: "Status" },
+];
+// The nine columns the list has always shown — so a system with nothing saved
+// looks exactly as it did before this panel existed.
+var HIST_DEFAULT_COLS = { doc: 1, type: 1, client: 1, date: 1, due: 1, sales: 1, total: 1, balance: 1, status: 1 };
+
+function histSettings() {
+  var p = (BCCWE.prefs && BCCWE.prefs.histView) || {};
+  return {
+    cols: p.cols || HIST_DEFAULT_COLS,
+    pageSize: p.pageSize || 8,
+    density: p.density || "normal",
+    flagOverdue: p.flagOverdue !== false,
+    outstandingOnly: !!p.outstandingOnly,
+    defPeriod: p.defPeriod || "all",
+    defSort: p.defSort || "date_desc",
+    showTotals: p.showTotals !== false,
+  };
+}
+function histColOn(key) {
+  for (var i = 0; i < HIST_COLUMNS.length; i++) {
+    if (HIST_COLUMNS[i].key === key) { if (HIST_COLUMNS[i].always) return true; break; }
+  }
+  return !!histSettings().cols[key];
+}
+// Days past the due date. Positive = overdue by that many days. Null when the
+// document has no due date or is settled, so nothing is flagged wrongly.
+function histOverdueDays(r) {
+  if (!r.due || r.txn !== "Sale") return null;
+  if ((r.balance || 0) <= 0.005) return null;
+  var d = Math.floor((new Date(BCCWE.today) - new Date(r.due)) / 86400000);
+  return d > 0 ? d : null;
+}
+
 /* ---------------- Invoice History ---------------- */
 function InvoiceHistory({ go, pushToast, store }) {
   const D = BCCWE;
@@ -671,17 +723,22 @@ function InvoiceHistory({ go, pushToast, store }) {
     next = next.includes(val) ? next.filter((x) => x !== val) : [...next, val];
     setSel(next.length ? next : ["All"]);
   }
-  const [sort, setSort] = useState("date_desc");
+  // How this list is shown is a saved preference (Settings button, top right).
+  const _hs = histSettings();
+  const _shownCols = HIST_COLUMNS.filter((c) => c.always || _hs.cols[c.key]);
+  const [sort, setSort] = useState(() => histSettings().defSort);
   const [page, setPage] = useState(0);
-  const [period, setPeriod] = useState("all");
+  const [period, setPeriod] = useState(() => histSettings().defPeriod);
   const [from, setFrom] = useState(D.today.slice(0, 4) + "-01-01");
   const [to, setTo] = useState(D.today);
+  const [pageSize, setPageSize] = useState(() => histSettings().pageSize);
   const [showEmail, setShowEmail] = useState(false);
   const [emailInv, setEmailInv] = useState(null);
   const [showImport, setShowImport] = useState(false);
   const [showTaxFix, setShowTaxFix] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [, setRev] = useState(0);
   const range = periodRange(period, from, to);
-  const PER = 8;
 
   // Store the imported invoices belong to: the active store filter, or the default.
   const importCompanyId = () => (sf !== "all" ? sf : (window.STORES ? window.STORES.defaultId() : ""));
@@ -767,6 +824,8 @@ function InvoiceHistory({ go, pushToast, store }) {
         if (!ok) return false;
       }
       if (statusActive && r.txn === "Sale" && !statusSel.includes(r.status)) return false;
+      // "Money still owed only" — a saved setting for chasing outstanding balances.
+      if (_hs.outstandingOnly && (r.balance || 0) <= 0.005) return false;
       if (sales !== "All" && r.sales !== sales) return false;
       if (sf !== "all" && window.STORES) {
         const rs = r.txn === "Sale" ? (r.companyId || window.STORES.idOf(r))
@@ -782,11 +841,16 @@ function InvoiceHistory({ go, pushToast, store }) {
       return true;
     });
     return applySort(filtered, sort, invSorts);
-  }, [q, statusSel, txnSel, sales, sort, period, from, to, sf, _clientId, D.invoices.length, D.creditNotes.length, D.cashSales.length]);
+  }, [q, statusSel, txnSel, sales, sort, period, from, to, sf, _clientId, _hs.outstandingOnly, D.invoices.length, D.creditNotes.length, D.cashSales.length]);
 
+  const PER = pageSize === "All" ? Math.max(1, rows.length) : pageSize;
   const pages = Math.max(1, Math.ceil(rows.length / PER));
   const slice = rows.slice(page * PER, page * PER + PER);
-  const totals = rows.reduce((a, i) => { a.total += i.total; a.due += (i.balance || 0); a.sub += (i.subtotal || 0); return a; }, { total: 0, due: 0, sub: 0 });
+  const totals = rows.reduce((a, i) => {
+    a.total += i.total; a.due += (i.balance || 0); a.sub += (i.subtotal || 0);
+    a.tax += (i.total || 0) - (i.subtotal || 0); a.paid += (i.paid || 0);
+    return a;
+  }, { total: 0, due: 0, sub: 0, tax: 0, paid: 0 });
 
   function buildExportSpec() {
     const cols = [
@@ -849,6 +913,7 @@ function InvoiceHistory({ go, pushToast, store }) {
     <div>
       <PageHead title="Invoice History" sub={rows.length + " transactions · " + range.label + " · " + fmt(totals.due) + " outstanding"}
         actions={<>
+          <Btn variant="ghost" icon="settings" onClick={() => setShowSettings(true)}>Settings</Btn>
           <Btn variant="ghost" icon="download" onClick={() => setShowImport(true)}>Import CSV</Btn>
           <Btn variant="ghost" icon="mail" onClick={() => setShowEmail(true)}>Email</Btn>
           <Btn variant="ghost" icon="download" onClick={exportExcel}>Export Excel</Btn>
@@ -891,11 +956,16 @@ function InvoiceHistory({ go, pushToast, store }) {
           <SortControl sort={sort} setSort={(v) => { setSort(v); setPage(0); }} defs={invSorts} />
         </div>
 
-        <table className="data-table">
+        {/* Turning on many columns makes the table wider than the card, so it
+            scrolls sideways instead of squeezing every column unreadably thin. */}
+        <div className="table-scroll">
+        <table className={"data-table" + (_hs.density === "compact" ? " tight" : "")}>
           <thead>
             <tr>
-              <th>Document</th><th>Type</th><th>Client</th><th>Date</th><th>Due</th><th>Salesperson</th>
-              <th className="r">Total</th><th className="r">Balance</th><th>Status</th><th />
+              {_shownCols.map((c) => (
+                <th key={c.key} className={["subtotal", "tax", "total", "paid", "balance", "age"].includes(c.key) ? "r" : ""}>{c.short || c.label}</th>
+              ))}
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -904,21 +974,36 @@ function InvoiceHistory({ go, pushToast, store }) {
               const bal = isSale ? r.total - r.paid : 0;
               const typeTone = r.txn === "Return" ? "red" : r.txn === "Exchange" ? "blue" : "slate";
               const target = isSale ? r.no : r.origInv;
-              return (
-                <tr key={r.doc}>
-                  <td>{r.register
+              const late = histOverdueDays(r);
+              // One cell per chosen column, so the table follows the settings
+              // panel instead of a fixed row of cells.
+              const cell = (key) => {
+                switch (key) {
+                  case "doc": return <td key={key}>{r.register
                     ? <span className="mono strong">{r.doc} <em className="cat-tag">register</em></span>
-                    : <button className="link mono strong" onClick={() => target && go("invoiceview/" + target)}>{r.doc}</button>}</td>
-                  <td><Badge tone={typeTone}>{saleKindLabel(r)}</Badge></td>
-                  <td>{r.register
+                    : <button className="link mono strong" onClick={() => target && go("invoiceview/" + target)}>{r.doc}</button>}</td>;
+                  case "type": return <td key={key}><Badge tone={typeTone}>{saleKindLabel(r)}</Badge></td>;
+                  case "client": return <td key={key}>{r.register
                     ? <span>{r.clientLabel} <em className="cat-tag">{r.type}</em></span>
-                    : <button className="link" onClick={() => go("client/" + r.clientId)}>{clientName(r.clientId)}</button>}</td>
-                  <td className="muted">{shortDate(r.date)}</td>
-                  <td className="muted">{r.due ? shortDate(r.due) : "—"}</td>
-                  <td>{personName(r.sales)}</td>
-                  <td className={"r mono" + (r.total < 0 ? " neg" : "")}>{fmt(r.total)}</td>
-                  <td className="r mono">{isSale && bal > 0.005 ? fmt(bal) : "—"}</td>
-                  <td><Badge tone={statusTone(r.status)} dot>{r.status}</Badge></td>
+                    : <button className="link" onClick={() => go("client/" + r.clientId)}>{clientName(r.clientId)}</button>}</td>;
+                  case "date": return <td key={key} className="muted nw">{shortDate(r.date)}</td>;
+                  case "due": return <td key={key} className="muted nw">{r.due ? shortDate(r.due) : "—"}</td>;
+                  case "age": return <td key={key} className="r mono nw">{late ? <span className="neg">{late}d late</span> : "—"}</td>;
+                  case "sales": return <td key={key}>{personName(r.sales)}</td>;
+                  case "store": return <td key={key} className="muted">{(window.STORES && window.STORES.nameOf(window.STORES.idOf(r))) || "—"}</td>;
+                  case "pono": return <td key={key} className="mono muted">{r.poNo || "—"}</td>;
+                  case "subtotal": return <td key={key} className="r mono">{fmt(r.subtotal || 0)}</td>;
+                  case "tax": return <td key={key} className="r mono">{fmt((r.total || 0) - (r.subtotal || 0))}</td>;
+                  case "total": return <td key={key} className={"r mono" + (r.total < 0 ? " neg" : "")}>{fmt(r.total)}</td>;
+                  case "paid": return <td key={key} className="r mono">{fmt(r.paid || 0)}</td>;
+                  case "balance": return <td key={key} className="r mono">{isSale && bal > 0.005 ? fmt(bal) : "—"}</td>;
+                  case "status": return <td key={key}><Badge tone={statusTone(r.status)} dot>{r.status}</Badge></td>;
+                  default: return <td key={key} />;
+                }
+              };
+              return (
+                <tr key={r.doc} className={(_hs.flagOverdue && late) ? "row-due" : ""}>
+                  {_shownCols.map((c) => cell(c.key))}
                   <td className="row-acts">
                     {r.register
                       ? <button className="icon-btn" title="Register entry — no invoice document" disabled><Icon name="receipt" size={15} /></button>
@@ -933,9 +1018,28 @@ function InvoiceHistory({ go, pushToast, store }) {
                 </tr>
               );
             })}
-            {!slice.length && <tr><td colSpan="10"><Empty icon="invoice" text="No transactions match this view" /></td></tr>}
+            {!slice.length && <tr><td colSpan={_shownCols.length + 1}><Empty icon="invoice" text="No transactions match this view" /></td></tr>}
           </tbody>
+          {(_hs.showTotals && !!rows.length) && (
+            <tfoot>
+              <tr className="hist-tot">
+                {_shownCols.map((c, idx) => {
+                  if (idx === 0) return <td key={c.key}><strong>Totals · {rows.length}</strong></td>;
+                  switch (c.key) {
+                    case "subtotal": return <td key={c.key} className="r mono strong">{fmt(totals.sub)}</td>;
+                    case "tax": return <td key={c.key} className="r mono strong">{fmt(totals.tax)}</td>;
+                    case "total": return <td key={c.key} className="r mono strong">{fmt(totals.total)}</td>;
+                    case "paid": return <td key={c.key} className="r mono strong">{fmt(totals.paid)}</td>;
+                    case "balance": return <td key={c.key} className="r mono strong">{fmt(totals.due)}</td>;
+                    default: return <td key={c.key} />;
+                  }
+                })}
+                <td />
+              </tr>
+            </tfoot>
+          )}
         </table>
+        </div>
 
         <div className="table-foot">
           <span className="muted">Showing {slice.length} of {rows.length} · Net total {fmt(totals.total)}</span>
@@ -946,6 +1050,13 @@ function InvoiceHistory({ go, pushToast, store }) {
           </div>
         </div>
       </Card>
+      {showSettings && (
+        <HistorySettingsModal pushToast={pushToast} onClose={() => setShowSettings(false)}
+          onSaved={() => {
+            const s = histSettings();
+            setPageSize(s.pageSize); setPage(0); setRev((n) => n + 1);
+          }} />
+      )}
       {showImport && (
         <ImportModal {...invoiceImport} pushToast={pushToast} onClose={() => setShowImport(false)} />
       )}
@@ -961,6 +1072,115 @@ function InvoiceHistory({ go, pushToast, store }) {
           onClose={() => setEmailInv(null)} pushToast={pushToast} />
       )}
     </div>
+  );
+}
+
+/* ---------------- Invoice History — settings panel ----------------
+   Columns, list behaviour and what the page opens on, in one place. */
+function HistorySettingsModal({ pushToast, onClose, onSaved }) {
+  const D = BCCWE;
+  if (!D.prefs) D.prefs = {};
+  const cur = histSettings();
+  const [cols, setCols] = useState(() => Object.assign({}, cur.cols));
+  const [pageSize, setPageSize] = useState(cur.pageSize);
+  const [density, setDensity] = useState(cur.density);
+  const [flagOverdue, setFlagOverdue] = useState(cur.flagOverdue);
+  const [outstandingOnly, setOutstandingOnly] = useState(cur.outstandingOnly);
+  const [showTotals, setShowTotals] = useState(cur.showTotals);
+  const [defPeriod, setDefPeriod] = useState(cur.defPeriod);
+  const [defSort, setDefSort] = useState(cur.defSort);
+
+  const toggle = (k) => setCols((c) => Object.assign({}, c, { [k]: !c[k] }));
+  const onCount = HIST_COLUMNS.filter((c) => c.always || cols[c.key]).length;
+
+  function save() {
+    D.prefs.histView = {
+      cols: cols, pageSize: pageSize, density: density, flagOverdue: flagOverdue,
+      outstandingOnly: outstandingOnly, showTotals: showTotals, defPeriod: defPeriod, defSort: defSort,
+    };
+    if (window.persist) window.persist("prefs");
+    window.logAudit && window.logAudit("UPDATE", "Settings", "prefs", "invoice-history", "Updated invoice history view settings");
+    pushToast && pushToast("Invoice history settings saved");
+    onSaved && onSaved();
+    onClose();
+  }
+  function resetCols() { setCols(Object.assign({}, HIST_DEFAULT_COLS)); }
+
+  return (
+    <Modal title="Invoice history settings" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" onClick={save}>Save settings</Btn>
+      </>}>
+      <h5 className="iv-sec" style={{ marginTop: 0 }}>Columns in the list <em className="muted" style={{ fontWeight: 400 }}>· {onCount} shown</em></h5>
+      <p className="rail-note" style={{ marginBottom: 10 }}>
+        Tick what you want to see. Document #, Client and Total always stay on.
+        <button className="link" style={{ marginLeft: 8 }} onClick={resetCols}>Reset to default</button>
+      </p>
+      <div className="set-cols">
+        {HIST_COLUMNS.map((c) => (
+          <label key={c.key} className="email-pick" style={{ opacity: c.always ? .6 : 1 }}>
+            <input type="checkbox" checked={!!(c.always || cols[c.key])} disabled={c.always} onChange={() => toggle(c.key)} />
+            <span>{c.label}</span>
+          </label>
+        ))}
+      </div>
+      <div className="inline-note" style={{ marginTop: 4 }}>
+        <Icon name="alert" size={15} /> Register sales have no invoice document, due date or P.O. number — those
+        columns simply show a dash on those rows.
+      </div>
+
+      <h5 className="iv-sec">List behaviour</h5>
+      <div className="meta-grid">
+        <Field label="Rows per page">
+          <select value={String(pageSize)} onChange={(e) => setPageSize(e.target.value === "All" ? "All" : +e.target.value)}>
+            {[8, 15, 25, 50, 100, "All"].map((s) => <option key={String(s)} value={String(s)}>{s}</option>)}
+          </select>
+        </Field>
+        <Field label="Row height">
+          <select value={density} onChange={(e) => setDensity(e.target.value)}>
+            <option value="normal">Normal</option>
+            <option value="compact">Compact — more rows on screen</option>
+          </select>
+        </Field>
+      </div>
+      <label className="email-pick" style={{ marginTop: 8 }}>
+        <input type="checkbox" checked={flagOverdue} onChange={() => setFlagOverdue((v) => !v)} />
+        <span>Highlight overdue invoices in red (past the due date with money still owed)</span>
+      </label>
+      <label className="email-pick">
+        <input type="checkbox" checked={outstandingOnly} onChange={() => setOutstandingOnly((v) => !v)} />
+        <span>Show only documents with money still owed</span>
+      </label>
+      <label className="email-pick">
+        <input type="checkbox" checked={showTotals} onChange={() => setShowTotals((v) => !v)} />
+        <span>Show a totals row at the bottom of the table</span>
+      </label>
+
+      <h5 className="iv-sec">What the page opens on</h5>
+      <p className="rail-note" style={{ marginBottom: 10 }}>You can still change both on the page itself — this is only the starting point.</p>
+      <div className="meta-grid">
+        <Field label="Period">
+          <select value={defPeriod} onChange={(e) => setDefPeriod(e.target.value)}>
+            <option value="all">All time</option>
+            <option value="month">This month</option>
+            <option value="lastmonth">Last month</option>
+            <option value="year">This year</option>
+          </select>
+        </Field>
+        <Field label="Sort order">
+          <select value={defSort} onChange={(e) => setDefSort(e.target.value)}>
+            <option value="date_desc">Date — newest first</option>
+            <option value="date_asc">Date — oldest first</option>
+            <option value="no_desc">Invoice # — high to low</option>
+            <option value="no_asc">Invoice # — low to high</option>
+            <option value="total_desc">Amount — high to low</option>
+            <option value="balance_desc">Balance — high to low</option>
+            <option value="client_asc">Client — A to Z</option>
+          </select>
+        </Field>
+      </div>
+    </Modal>
   );
 }
 

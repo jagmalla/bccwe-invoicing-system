@@ -929,6 +929,10 @@ tr.recon-on { background: var(--accent-soft); }
 .data-table.tight td { padding-top: 5px; padding-bottom: 5px; }
 .data-table.tight .row-acts { white-space: nowrap; }
 tr.row-neg td { background: var(--red-soft); }
+tr.row-due td { background: var(--red-soft); }
+tr.hist-tot td { border-top: 2px solid var(--line); background: var(--bg-2, #faf9f7); font-size: 13px; }
+.table-scroll { overflow-x: auto; }
+.table-scroll th, .table-scroll td.nw { white-space: nowrap; }
 .data-table.tb td { padding: 8px 14px; }
 .aging-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 22px; }
 .aging-cell { padding: 14px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 5px; }

@@ -1036,6 +1036,76 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testHistorySettings() {
+  section("Invoice history settings (columns, list behaviour, defaults)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
+  const grab = (n) => {
+    const m = new RegExp("function\\s+" + n + "\\s*\\(").exec(src);
+    let i = src.indexOf("{", m.index), d = 0, e = -1;
+    for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return src.slice(m.index, e);
+  };
+  const grabVar = (n) => {
+    const m = new RegExp("var\\s+" + n + "\\s*=").exec(src);
+    let k = src.indexOf("=", m.index) + 1, d = 0;
+    for (; k < src.length; k++) { const c = src[k]; if ("([{".includes(c)) d++; else if (")]}".includes(c)) d--; else if (c === ";" && d === 0) { k++; break; } }
+    return src.slice(m.index, k);
+  };
+  let PREFS = {}, TODAY = "2026-08-16";
+  const H = new Function("BCCWE",
+    grabVar("HIST_COLUMNS") + "\n" + grabVar("HIST_DEFAULT_COLS") + "\n" + grab("histSettings") + "\n" +
+    grab("histColOn") + "\n" + grab("histOverdueDays") +
+    "\nreturn {HIST_COLUMNS,HIST_DEFAULT_COLS,histSettings,histColOn,histOverdueDays};"
+  )({ get prefs() { return PREFS; }, get today() { return TODAY; } });
+  const shown = () => H.HIST_COLUMNS.filter((c) => c.always || H.histSettings().cols[c.key]).map((c) => c.key);
+
+  PREFS = {};
+  ok(JSON.stringify(shown()) === JSON.stringify(["doc", "type", "client", "date", "due", "sales", "total", "balance", "status"]),
+    "with nothing saved, the columns match the existing table exactly (no surprise change)");
+  const d = H.histSettings();
+  ok(d.pageSize === 8 && d.defPeriod === "all" && d.defSort === "date_desc" && d.flagOverdue === true
+    && d.outstandingOnly === false && d.showTotals === true,
+    "defaults keep today's behaviour: 8 rows, all time, newest first, nothing hidden");
+
+  PREFS = { histView: { cols: {} } };
+  ok(H.histColOn("doc") && H.histColOn("client") && H.histColOn("total"),
+    "document #, client and total stay on even if every box is cleared");
+  ok(!H.histColOn("status") && !H.histColOn("store"), "optional columns follow the saved setting");
+
+  PREFS = { histView: { cols: { store: 1, pono: 1, subtotal: 1, tax: 1, paid: 1, age: 1 } } };
+  const k = shown();
+  ok(["store", "pono", "subtotal", "tax", "paid", "age"].every((x) => k.includes(x)),
+    "store, P.O. #, pre-tax amount, tax, paid and age can all be shown");
+  ok(k[0] === "doc" && k.indexOf("client") < k.indexOf("total"),
+    "columns keep their defined order rather than the order they were ticked");
+
+  PREFS = { histView: { cols: {}, pageSize: "All", density: "compact", flagOverdue: false, outstandingOnly: true, showTotals: false, defPeriod: "month", defSort: "balance_desc" } };
+  const s = H.histSettings();
+  ok(s.pageSize === "All" && s.density === "compact" && s.flagOverdue === false && s.outstandingOnly === true
+    && s.showTotals === false && s.defPeriod === "month" && s.defSort === "balance_desc",
+    "every list-behaviour and opening-view choice persists");
+
+  // "Money still owed only" must keep partially-paid documents and drop settled ones.
+  const docs = [
+    { doc: "A", balance: 500 }, { doc: "B", balance: 0 },
+    { doc: "C", balance: 0.004 }, { doc: "D", balance: 12.5 },
+  ];
+  const left = docs.filter((r) => !s.outstandingOnly || (r.balance || 0) > 0.005).map((r) => r.doc);
+  ok(JSON.stringify(left) === JSON.stringify(["A", "D"]),
+    "'money still owed only' drops settled documents, including ones a rounding cent away from zero");
+
+  // Overdue flagging: only unpaid sales past their due date.
+  ok(H.histOverdueDays({ txn: "Sale", due: "2026-08-01", balance: 100 }) === 15,
+    "an unpaid invoice 15 days past its due date reports 15 days late");
+  ok(H.histOverdueDays({ txn: "Sale", due: "2026-08-01", balance: 0 }) === null,
+    "a PAID invoice past its due date is never flagged overdue");
+  ok(H.histOverdueDays({ txn: "Sale", due: "2026-09-30", balance: 100 }) === null,
+    "an invoice not yet due is not flagged");
+  ok(H.histOverdueDays({ txn: "Return", due: "2026-08-01", balance: 100 }) === null
+    && H.histOverdueDays({ txn: "Sale", due: null, balance: 100 }) === null,
+    "returns and register sales (no due date) are never flagged overdue");
+}
+
 (async function main() {
   console.log("BCCWE regression harness");
   try {
@@ -1050,6 +1120,7 @@ function testInventorySettings() {
     testPurchasingAndStores();
     testBarcodes();
     testInventorySettings();
+    testHistorySettings();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

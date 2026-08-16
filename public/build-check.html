@@ -26,18 +26,18 @@
   <h1>BCCWE build check</h1>
   <p class="sub">Reads the files straight off the server with caching switched off, so it shows what is
     really uploaded — not what your browser remembers.</p>
-  <div class="row"><b>Expected build</b><span class="v">20260816c</span></div>
+  <div class="row"><b>Expected build</b><span class="v">20260816d</span></div>
   <div class="row"><b>index.html on the server</b><span class="v wait" id="r-idx">checking…</span></div>
   <div class="row"><b>app/ files it asks for</b><span class="v wait" id="r-cnt">checking…</span></div>
-  <div class="row"><b>screens-b.jsx — Settings button</b><span class="v wait" id="r-btn">checking…</span></div>
-  <div class="row"><b>screens-b.jsx — settings panel</b><span class="v wait" id="r-mod">checking…</span></div>
+  <div class="row"><b>screens-b.jsx — Inventory settings</b><span class="v wait" id="r-btn">checking…</span></div>
+  <div class="row"><b>screens-a.jsx — Invoice history settings</b><span class="v wait" id="r-mod">checking…</span></div>
   <div class="row"><b>screens-barcodes.jsx — label fix</b><span class="v wait" id="r-bc">checking…</span></div>
   <div class="row"><b>styles.css — settings styles</b><span class="v wait" id="r-css">checking…</span></div>
   <div class="verdict wait" id="verdict">Running checks…</div>
 </div>
 <script>
 (function () {
-  var EXPECT = "20260816c";
+  var EXPECT = "20260816d";
   var bust = "?nocache=" + Date.now();
   function set(id, text, cls) {
     var el = document.getElementById(id);
@@ -51,7 +51,7 @@
   }
   var results = {};
   function finish() {
-    if (Object.keys(results).length < 4) return; // four files are checked
+    if (Object.keys(results).length < 5) return; // five files are checked
     var v = document.getElementById("verdict");
     var bad = Object.keys(results).filter(function (k) { return !results[k]; });
     if (!bad.length) {
@@ -81,15 +81,20 @@
     set("r-cnt", "—", "bad"); results["index.html"] = false; finish();
   });
   grab("app/screens-b.jsx").then(function (t) {
-    var hasBtn = t.indexOf(">Settings</Btn>") >= 0;
-    var hasMod = t.indexOf("function InventorySettingsModal") >= 0;
+    var hasBtn = t.indexOf("function InventorySettingsModal") >= 0;
     set("r-btn", hasBtn ? "present" : "MISSING — old file", hasBtn ? "ok" : "bad");
-    set("r-mod", hasMod ? "present" : "MISSING — old file", hasMod ? "ok" : "bad");
-    results["app/screens-b.jsx"] = hasBtn && hasMod;
-    finish();
+    results["app/screens-b.jsx"] = hasBtn; finish();
   }).catch(function (e) {
     set("r-btn", "could not read (" + e.message + ")", "bad");
-    set("r-mod", "—", "bad"); results["app/screens-b.jsx"] = false; finish();
+    results["app/screens-b.jsx"] = false; finish();
+  });
+  grab("app/screens-a.jsx").then(function (t) {
+    var hasMod = t.indexOf("function HistorySettingsModal") >= 0;
+    set("r-mod", hasMod ? "present" : "MISSING — old file", hasMod ? "ok" : "bad");
+    results["app/screens-a.jsx"] = hasMod; finish();
+  }).catch(function (e) {
+    set("r-mod", "could not read (" + e.message + ")", "bad");
+    results["app/screens-a.jsx"] = false; finish();
   });
   grab("app/screens-barcodes.jsx").then(function (t) {
     var okf = t.indexOf("D.prefs.barcode || {}") >= 0;
