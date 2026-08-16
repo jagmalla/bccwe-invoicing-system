@@ -941,6 +941,19 @@ tr.recon-on { background: var(--accent-soft); }
 tr.row-neg td { background: var(--red-soft); }
 tr.row-due td { background: var(--red-soft); }
 tr.hist-tot td { border-top: 2px solid var(--line); background: var(--bg-2, #faf9f7); font-size: 13px; }
+/* Sortable column headers */
+.data-table th.th-sort { padding: 0; }
+.data-table th.th-sort > button { display: inline-flex; align-items: center; gap: 6px; width: 100%;
+  padding: 11px 14px; background: none; border: 0; cursor: pointer; font: inherit; color: inherit;
+  letter-spacing: inherit; text-transform: inherit; text-align: inherit; }
+.data-table th.th-sort.r > button { justify-content: flex-end; }
+.data-table th.th-sort > button:hover { color: var(--ink); background: var(--surface-2); }
+.data-table th.th-sort.on > button { color: var(--accent-ink); }
+.th-arrows { flex-shrink: 0; }
+.th-arrows path { fill: var(--ink-3); opacity: .32; transition: opacity .12s, fill .12s; }
+.data-table th.th-sort > button:hover .th-arrows path { opacity: .5; }
+.th-arrows path.act { fill: var(--accent); opacity: 1; }
+
 .table-scroll { overflow-x: auto; }
 .table-scroll th, .table-scroll td.nw { white-space: nowrap; }
 /* Store colour coding — the row tint is set inline (each store has its own),

@@ -956,7 +956,31 @@ function InvoiceHistory({ go, pushToast, store }) {
     total_desc: { label: "Amount — high to low", get: (r) => r.total, dir: "desc" },
     total_asc: { label: "Amount — low to high", get: (r) => r.total, dir: "asc" },
     balance_desc: { label: "Balance — high to low", get: (r) => r.total - r.paid, dir: "desc" },
+    balance_asc: { label: "Balance — low to high", get: (r) => r.total - r.paid, dir: "asc" },
     client_asc: { label: "Client — A to Z", get: (r) => clientName(r.clientId), dir: "asc" },
+    client_desc: { label: "Client — Z to A", get: (r) => clientName(r.clientId), dir: "desc" },
+    due_asc: { label: "Due date — soonest first", get: (r) => new Date(r.due || "2999-12-31").getTime(), dir: "asc" },
+    due_desc: { label: "Due date — latest first", get: (r) => new Date(r.due || "1900-01-01").getTime(), dir: "desc" },
+    status_asc: { label: "Status — A to Z", get: (r) => r.status || "", dir: "asc" },
+    status_desc: { label: "Status — Z to A", get: (r) => r.status || "", dir: "desc" },
+    type_asc: { label: "Type — A to Z", get: (r) => r.txn || "", dir: "asc" },
+    type_desc: { label: "Type — Z to A", get: (r) => r.txn || "", dir: "desc" },
+    sales_asc: { label: "Salesperson — A to Z", get: (r) => personName(r.sales) || "", dir: "asc" },
+    sales_desc: { label: "Salesperson — Z to A", get: (r) => personName(r.sales) || "", dir: "desc" },
+    store_asc: { label: "Store — A to Z", get: (r) => (window.STORES ? window.STORES.nameOf(window.STORES.idOf(r)) : "") || "", dir: "asc" },
+    store_desc: { label: "Store — Z to A", get: (r) => (window.STORES ? window.STORES.nameOf(window.STORES.idOf(r)) : "") || "", dir: "desc" },
+    sub_desc: { label: "Amount before tax — high to low", get: (r) => r.subtotal || 0, dir: "desc" },
+    sub_asc: { label: "Amount before tax — low to high", get: (r) => r.subtotal || 0, dir: "asc" },
+    paid_desc: { label: "Paid — high to low", get: (r) => r.paid || 0, dir: "desc" },
+    paid_asc: { label: "Paid — low to high", get: (r) => r.paid || 0, dir: "asc" },
+  };
+  // Which sort ids each column header drives. The id listed first is the
+  // direction a first click uses: names read A-Z, money reads high-to-low.
+  const HIST_SORTS = {
+    doc: ["no_asc", "no_desc"], type: ["type_asc", "type_desc"], client: ["client_asc", "client_desc"],
+    date: ["date_desc", "date_asc"], due: ["due_asc", "due_desc"], sales: ["sales_asc", "sales_desc"],
+    store: ["store_asc", "store_desc"], subtotal: ["sub_desc", "sub_asc"], total: ["total_desc", "total_asc"],
+    paid: ["paid_desc", "paid_asc"], balance: ["balance_desc", "balance_asc"], status: ["status_asc", "status_desc"],
   };
 
   const rows = useMemo(() => {
@@ -1116,7 +1140,9 @@ function InvoiceHistory({ go, pushToast, store }) {
           <thead>
             <tr>
               {_shownCols.map((c) => (
-                <th key={c.key} className={["subtotal", "tax", "total", "paid", "balance", "age"].includes(c.key) ? "r" : ""}>{c.short || c.label}</th>
+                <SortTh key={c.key} label={c.short || c.label} ids={HIST_SORTS[c.key]}
+                  className={["subtotal", "tax", "total", "paid", "balance", "age"].includes(c.key) ? "r" : ""}
+                  sort={sort} setSort={(v) => { setSort(v); setPage(0); }} />
               ))}
               <th />
             </tr>

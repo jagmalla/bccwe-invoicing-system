@@ -153,6 +153,36 @@ function SortControl({ sort, setSort, defs, label = "Sort" }) {
   );
 }
 
+/* ---------- sortable column header ----------
+   Clicking the header sorts by that column; clicking again reverses it. The
+   arrows show state at rest: faint both-ways when the column is not the one in
+   use, and a single solid arrow pointing the way the rows are ordered. Columns
+   with no sort defined render as a plain header, so nothing looks clickable
+   unless it is. `asc`/`desc` are ids from the same defs the Sort dropdown uses,
+   which keeps the two controls showing the same thing. */
+function SortTh({ label, ids, sort, setSort, className }) {
+  const list = ids || [];
+  if (!list.length) return <th className={className}>{label}</th>;
+  const idx = list.indexOf(sort);
+  // First click uses ids[0] — callers put the more useful direction first, so
+  // names start A-Z and money starts high-to-low. Later clicks cycle the rest.
+  const cur = idx >= 0 ? list[idx] : "";
+  const state = /_asc$/.test(cur) ? "asc" : /_desc$/.test(cur) ? "desc" : "";
+  const onClick = () => setSort(idx >= 0 ? list[(idx + 1) % list.length] : list[0]);
+  const title = "Sort by " + String(label).toLowerCase() + (idx >= 0 ? " (click to reverse)" : "");
+  return (
+    <th className={(className || "") + " th-sort" + (idx >= 0 ? " on" : "")}>
+      <button type="button" onClick={onClick} title={title} aria-label={title}>
+        <span>{label}</span>
+        <svg className="th-arrows" width="10" height="14" viewBox="0 0 10 14" aria-hidden="true">
+          <path d="M5 1.5 8.2 5.4H1.8z" className={"th-up" + (state === "asc" ? " act" : "")} />
+          <path d="M5 12.5 1.8 8.6h6.4z" className={"th-dn" + (state === "desc" ? " act" : "")} />
+        </svg>
+      </button>
+    </th>
+  );
+}
+
 /* ---------- multi-select filter dropdown ----------
    A row of tick-boxes eats the whole toolbar once there are more than three or
    four. This collapses them into one control that states what is selected, and

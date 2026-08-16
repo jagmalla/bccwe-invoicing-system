@@ -216,6 +216,41 @@ function Inventory({ go, pushToast, initTab }) {
     age_desc: { label: "Oldest stock first", get: (i) => window.STOCK.ageDays(i), dir: "desc" },
     move_desc: { label: "Fastest moving", get: (i) => window.STOCK.movement(i).perMonth, dir: "desc" },
     move_asc: { label: "Slowest moving", get: (i) => window.STOCK.movement(i).perMonth, dir: "asc" },
+    code_desc: { label: "Item code — Z to A", get: (i) => i.code, dir: "desc" },
+    name_desc: { label: "Name — Z to A", get: (i) => i.name, dir: "desc" },
+    cost_desc: { label: "Cost — high to low", get: (i) => i.cost || 0, dir: "desc" },
+    cost_asc: { label: "Cost — low to high", get: (i) => i.cost || 0, dir: "asc" },
+    barcode_asc: { label: "Barcode — low to high", get: (i) => i.barcode || "", dir: "asc" },
+    barcode_desc: { label: "Barcode — high to low", get: (i) => i.barcode || "", dir: "desc" },
+    cat_asc: { label: "Category — A to Z", get: (i) => i.cat || "", dir: "asc" },
+    cat_desc: { label: "Category — Z to A", get: (i) => i.cat || "", dir: "desc" },
+    supplier_asc: { label: "Supplier — A to Z", get: (i) => supplierName(i.supplier) || "", dir: "asc" },
+    supplier_desc: { label: "Supplier — Z to A", get: (i) => supplierName(i.supplier) || "", dir: "desc" },
+    store_asc: { label: "Store — A to Z", get: (i) => i.store || "", dir: "asc" },
+    store_desc: { label: "Store — Z to A", get: (i) => i.store || "", dir: "desc" },
+    bonus_desc: { label: "Bonus stock — high to low", get: (i) => i.bonus || 0, dir: "desc" },
+    bonus_asc: { label: "Bonus stock — low to high", get: (i) => i.bonus || 0, dir: "asc" },
+    alert_desc: { label: "Alert level — high to low", get: (i) => i.alert || 0, dir: "desc" },
+    alert_asc: { label: "Alert level — low to high", get: (i) => i.alert || 0, dir: "asc" },
+    stockval_desc: { label: "Stock value — high to low", get: (i) => (i.stock || 0) * (i.cost || 0), dir: "desc" },
+    stockval_asc: { label: "Stock value — low to high", get: (i) => (i.stock || 0) * (i.cost || 0), dir: "asc" },
+    retail_desc: { label: "Retail value — high to low", get: (i) => (i.stock || 0) * (i.price || 0), dir: "desc" },
+    retail_asc: { label: "Retail value — low to high", get: (i) => (i.stock || 0) * (i.price || 0), dir: "asc" },
+    age_asc: { label: "Newest stock first", get: (i) => window.STOCK.ageDays(i), dir: "asc" },
+    status_asc: { label: "Status — A to Z", get: (i) => window.STOCK.state(i) || "", dir: "asc" },
+    status_desc: { label: "Status — Z to A", get: (i) => window.STOCK.state(i) || "", dir: "desc" },
+  };
+  // Which sort ids each stock column header drives; ids[0] is the first click.
+  const INV_SORTS = {
+    code: ["code_asc", "code_desc"], barcode: ["barcode_asc", "barcode_desc"],
+    name: ["name_asc", "name_desc"], cat: ["cat_asc", "cat_desc"],
+    supplier: ["supplier_asc", "supplier_desc"], store: ["store_asc", "store_desc"],
+    avgCost: ["cost_desc", "cost_asc"], lastCost: ["cost_desc", "cost_asc"],
+    price: ["price_desc", "price_asc"], margin: ["profit_desc", "profit_asc"],
+    stock: ["stock_desc", "stock_asc"], bonus: ["bonus_desc", "bonus_asc"],
+    alert: ["alert_desc", "alert_asc"], stockValue: ["stockval_desc", "stockval_asc"],
+    retailValue: ["retail_desc", "retail_asc"], purchased: ["age_desc", "age_asc"],
+    movement: ["move_desc", "move_asc"], status: ["status_asc", "status_desc"],
   };
 
   const cats = ["All", ...Array.from(new Set(D.inventory.map((i) => i.cat)))];
@@ -657,7 +692,11 @@ function Inventory({ go, pushToast, initTab }) {
           </div>
           <table className={"data-table" + (_invSet.density === "compact" ? " tight" : "")}>
             <thead><tr>
-              {_shownCols.map((c) => <th key={c.key} className={["avgCost", "lastCost", "price", "margin", "stock", "bonus", "alert", "stockValue", "retailValue"].includes(c.key) ? "r" : ""}>{c.short || c.label}</th>)}
+              {_shownCols.map((c) => (
+                <SortTh key={c.key} label={c.short || c.label} ids={INV_SORTS[c.key]}
+                  className={["avgCost", "lastCost", "price", "margin", "stock", "bonus", "alert", "stockValue", "retailValue"].includes(c.key) ? "r" : ""}
+                  sort={sort} setSort={(v) => { setSort(v); resetPage(); }} />
+              ))}
               <th />
             </tr></thead>
             <tbody>

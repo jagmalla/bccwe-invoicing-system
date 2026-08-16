@@ -1036,6 +1036,61 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testSortHeaders() {
+  section("Sortable column headers");
+  // Match whichever bracket opens the literal — HIST_COLUMNS is an array, the
+  // sort maps are objects — or an array's first element is grabbed as the whole.
+  const block = (src, decl) => {
+    const m = new RegExp(decl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).exec(src);
+    const ob = src.indexOf("{", m.index), ar = src.indexOf("[", m.index);
+    const open = (ar !== -1 && ar < ob) ? "[" : "{";
+    const close = open === "[" ? "]" : "}";
+    let k = open === "[" ? ar : ob, d = 0, e = -1;
+    for (let i = k; i < src.length; i++) { if (src[i] === open) d++; else if (src[i] === close) { d--; if (!d) { e = i + 1; break; } } }
+    return src.slice(k, e);
+  };
+  // Sort definitions each start "id: { label:", which is enough to list the ids
+  // without evaluating the getter functions (they close over component scope).
+  const defIds = (txt) => (txt.match(/(\w+):\s*\{\s*label:/g) || []).map((s) => s.split(":")[0].trim());
+
+  const a = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
+  const b = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+  const cases = [
+    ["Invoice History", defIds(block(a, "const invSorts =")), new Function("return " + block(a, "const HIST_SORTS ="))()],
+    ["Inventory", defIds(block(b, "const invtSorts =")), new Function("return " + block(b, "const INV_SORTS ="))()],
+  ];
+
+  cases.forEach(([name, ids, map]) => {
+    const missing = [];
+    Object.keys(map).forEach((col) => (map[col] || []).forEach((id) => { if (!ids.includes(id)) missing.push(col + "→" + id); }));
+    ok(!missing.length, name + ": every header's sort id exists in the sort defs"
+      + (missing.length ? " — missing " + missing.join(", ") : ""));
+    const badDir = Object.keys(map).filter((col) => !(map[col] || []).every((id) => /_(asc|desc)$/.test(id)));
+    ok(!badDir.length, name + ": every sort id ends in _asc or _desc, which is how the arrow picks its direction"
+      + (badDir.length ? " — " + badDir.join(", ") : ""));
+    const notPair = Object.keys(map).filter((col) => {
+      const l = map[col] || [];
+      return l.length !== 2 || !l.some((x) => /_asc$/.test(x)) || !l.some((x) => /_desc$/.test(x));
+    });
+    ok(!notPair.length, name + ": every sortable header offers both directions"
+      + (notPair.length ? " — " + notPair.join(", ") : ""));
+  });
+
+  // The click cycle: no sort → ids[0] → ids[1] → back to ids[0].
+  const usrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
+  ok(/const onClick = \(\) => setSort\(idx >= 0 \? list\[\(idx \+ 1\) % list\.length\] : list\[0\]\);/.test(usrc),
+    "a first click uses the column's preferred direction, and further clicks cycle rather than dead-end");
+  ok(/if \(!list\.length\) return <th className=\{className\}>\{label\}<\/th>;/.test(usrc),
+    "a column with no sort defined renders as a plain header, so nothing looks clickable unless it is");
+
+  // Columns that exist in the table but have no sort — worth knowing, not fatal.
+  const histCols = (block(a, "var HIST_COLUMNS =").match(/key:\s*"(\w+)"/g) || []).map((s) => s.split('"')[1]);
+  const histMap = new Function("return " + block(a, "const HIST_SORTS ="))();
+  const noSort = histCols.filter((c) => !histMap[c]);
+  ok(JSON.stringify(noSort) === JSON.stringify(["age", "pono", "tax"]),
+    "only age, P.O. # and tax are left unsortable in Invoice History (derived display columns)");
+}
+
 function testNavColours() {
   section("Sidebar menu colours");
   const src = fs.readFileSync(path.join(ROOT, "public/app/app.jsx"), "utf8");
@@ -1293,6 +1348,7 @@ function testHistorySettings() {
     testHistorySettings();
     testSalesAssign();
     testNavColours();
+    testSortHeaders();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);
