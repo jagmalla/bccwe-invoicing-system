@@ -1,27 +1,30 @@
 /* ============================================================
    BCCWE — App shell, navigation, router, mount
    ============================================================ */
+// `tone` gives each menu item its own colour, so the eye lands on the right row
+// by colour instead of reading every label. Several items share the same glyph
+// (three use "history"), which is exactly why the colour has to differ.
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: "dashboard" },
-  { id: "pos", label: "POS", icon: "cart" },
-  { id: "neworder", label: "New Order", icon: "order" },
-  { id: "invoice", label: "Invoice Generator", icon: "invoice" },
-  { id: "return", label: "Return", icon: "history" },
-  { id: "exchange", label: "Exchange", icon: "history" },
-  { id: "history", label: "Invoice History", icon: "history" },
-  { id: "orders", label: "Client Orders", icon: "order" },
-  { id: "people", label: "Clients & Suppliers", icon: "people" },
-  { id: "inventory", label: "Inventory", icon: "box" },
-  { id: "purchaseorders", label: "Purchase Orders", icon: "truck" },
-  { id: "sales", label: "Sales", icon: "cart" },
-  { id: "expenses", label: "Expenses", icon: "receipt" },
-  { id: "accounting", label: "Accounting", icon: "ledger" },
-  { id: "unpaid", label: "Unpaid Invoices", icon: "alert" },
-  { id: "reports", label: "Reports", icon: "report" },
-  { id: "mail", label: "Sent Mail", icon: "mail" },
-  { id: "logs", label: "Activity Logs", icon: "history" },
-  { id: "stores", label: "Stores", icon: "store" },
-  { id: "settings", label: "Settings", icon: "settings" },
+  { id: "dashboard", label: "Dashboard", icon: "dashboard", tone: "#4f46e5" },
+  { id: "pos", label: "POS", icon: "cart", tone: "#16a34a" },
+  { id: "neworder", label: "New Order", icon: "order", tone: "#7c3aed" },
+  { id: "invoice", label: "Invoice Generator", icon: "invoice", tone: "#ea580c" },
+  { id: "return", label: "Return", icon: "history", tone: "#e11d48" },
+  { id: "exchange", label: "Exchange", icon: "history", tone: "#0891b2" },
+  { id: "history", label: "Invoice History", icon: "history", tone: "#2563eb" },
+  { id: "orders", label: "Client Orders", icon: "order", tone: "#7c3aed" },
+  { id: "people", label: "Clients & Suppliers", icon: "people", tone: "#0d9488" },
+  { id: "inventory", label: "Inventory", icon: "box", tone: "#a16207" },
+  { id: "purchaseorders", label: "Purchase Orders", icon: "truck", tone: "#b45309" },
+  { id: "sales", label: "Sales", icon: "cart", tone: "#16a34a" },
+  { id: "expenses", label: "Expenses", icon: "receipt", tone: "#dc2626" },
+  { id: "accounting", label: "Accounting", icon: "ledger", tone: "#059669" },
+  { id: "unpaid", label: "Unpaid Invoices", icon: "alert", tone: "#d97706" },
+  { id: "reports", label: "Reports", icon: "report", tone: "#9333ea" },
+  { id: "mail", label: "Sent Mail", icon: "mail", tone: "#0284c7" },
+  { id: "logs", label: "Activity Logs", icon: "history", tone: "#64748b" },
+  { id: "stores", label: "Stores", icon: "store", tone: "#db2777" },
+  { id: "settings", label: "Settings", icon: "settings", tone: "#4b5563" },
 ];
 const GROUPS = [
   { title: "Operate", ids: ["dashboard", "purchaseorders", "orders", "people"] },
@@ -199,7 +202,11 @@ function App() {
                   const n = NAV.find((x) => x.id === id);
                   return (
                     <button key={id} className={"nav-item" + (route === id ? " on" : "")} onClick={() => go(id)}>
-                      <Icon name={n.icon} size={18} />
+                      {/* The chip carries the item's colour; "20" is the alpha
+                          on the same hex, so the tint always matches the icon. */}
+                      <span className="nav-ico" style={{ color: n.tone, background: n.tone + "20" }}>
+                        <Icon name={n.icon} size={16} />
+                      </span>
                       <span>{n.label}</span>
                     </button>
                   );

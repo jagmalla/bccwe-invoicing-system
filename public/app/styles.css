@@ -106,6 +106,14 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   font-size: 13px; font-weight: 500; transition: background .14s, color .14s;
 }
 .nav-item svg { color: var(--sidebar-ink-2); transition: color .14s; flex-shrink: 0; }
+/* Coloured icon chip — each menu item keeps its own colour in every state,
+   including hover and selected, so the colour is a reliable landmark. */
+.nav-ico { width: 27px; height: 27px; border-radius: 8px; display: grid; place-items: center;
+  flex-shrink: 0; transition: transform .14s; }
+.nav-item .nav-ico svg,
+.nav-item:hover .nav-ico svg,
+.nav-item.on .nav-ico svg { color: inherit; }
+.nav-item:hover .nav-ico { transform: scale(1.06); }
 .nav-item span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-item:hover { background: #f2ece3; color: var(--ink); }
 .nav-item:hover svg { color: var(--ink-2); }

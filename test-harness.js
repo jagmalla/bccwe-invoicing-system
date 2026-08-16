@@ -1036,6 +1036,50 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testNavColours() {
+  section("Sidebar menu colours");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/app.jsx"), "utf8");
+  const m = /const\s+NAV\s*=\s*\[/.exec(src);
+  let k = src.indexOf("[", m.index), d = 0, e = -1;
+  for (let i = k; i < src.length; i++) { if (src[i] === "[") d++; else if (src[i] === "]") { d--; if (!d) { e = i + 1; break; } } }
+  const NAV = new Function("return " + src.slice(k, e))();
+  const GROUPS = new Function("return " + (() => {
+    const g = /const\s+GROUPS\s*=\s*\[/.exec(src);
+    let a = src.indexOf("[", g.index), dd = 0, ee = -1;
+    for (let i = a; i < src.length; i++) { if (src[i] === "[") dd++; else if (src[i] === "]") { dd--; if (!dd) { ee = i + 1; break; } } }
+    return src.slice(a, ee);
+  })())();
+
+  ok(NAV.every((n) => /^#[0-9a-f]{6}$/i.test(n.tone || "")),
+    "every menu item has a colour, written as a full 6-digit hex so the +\"20\" alpha suffix is valid");
+
+  // Items shown together must not share a colour, or the colour stops
+  // identifying anything. Three items use the same "history" glyph.
+  let clash = "";
+  GROUPS.forEach((g) => {
+    const seen = {};
+    g.ids.forEach((id) => {
+      const n = NAV.find((x) => x.id === id);
+      if (!n) return;
+      if (seen[n.tone]) clash = g.title + ": " + seen[n.tone] + " / " + id;
+      seen[n.tone] = id;
+    });
+  });
+  ok(!clash, "no two items in the same menu group share a colour" + (clash ? " — " + clash : ""));
+
+  const hist = NAV.filter((n) => n.icon === "history").map((n) => n.tone);
+  ok(new Set(hist).size === hist.length,
+    "the items sharing the 'history' glyph are told apart by colour");
+
+  // A pale icon on a pale chip would be unreadable.
+  const lum = (h) => { const [r, g, b] = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); return (r * 299 + g * 587 + b * 114) / 1000; };
+  ok(NAV.every((n) => lum(n.tone) < 170),
+    "every menu colour is dark enough to read against its own pale chip");
+
+  ok(GROUPS.every((g) => g.ids.every((id) => NAV.some((n) => n.id === id))),
+    "every id listed in a menu group actually exists in NAV");
+}
+
 function testSalesAssign() {
   section("Bulk salesperson assignment (imported invoices)");
   const src = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
@@ -1217,8 +1261,11 @@ function testHistorySettings() {
   // The ROW tint is not the pill colour: a whole table of it must stay close to
   // white, or a single-store view reads as a solid colour block.
   const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-  ok(C.STORE_PALETTE.every((p) => rgb(p.tint).every((v) => v >= 240)),
-    "every row tint is very light (no channel below 240) so a full table of it stays readable");
+  ok(C.STORE_PALETTE.every((p) => rgb(p.tint).every((v) => v >= 248)),
+    "every row tint is very light (no channel below 248) so a full table of it stays readable");
+  // …but not SO light that it stops being a tint at all.
+  ok(C.STORE_PALETTE.every((p) => rgb(p.tint).some((v) => v <= 253)),
+    "each tint still carries some colour — a pure-white tint would differentiate nothing");
   ok(C.STORE_PALETTE.every((p) => {
     const t = rgb(p.tint), s = rgb(p.soft);
     return t[0] + t[1] + t[2] > s[0] + s[1] + s[2];
@@ -1245,6 +1292,7 @@ function testHistorySettings() {
     testInventorySettings();
     testHistorySettings();
     testSalesAssign();
+    testNavColours();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);
