@@ -1036,6 +1036,66 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testInventoryImport() {
+  section("Inventory import (description + sales price mandatory, code optional)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-b.jsx"), "utf8");
+  const grab = (n) => {
+    const m = new RegExp("function\\s+" + n + "\\s*\\(").exec(src);
+    let i = src.indexOf("{", src.indexOf(")", m.index)), d = 0, e = -1;
+    for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return src.slice(m.index, e);
+  };
+  const INV = [{ code: "OLD-1", name: "Old Widget", price: 5, cost: 2, stock: 10 }];
+  const D = { get inventory() { return INV; } };
+  const itemByCode = (c) => INV.find((x) => x.code === c) || null;
+  const run = new Function("D", "itemByCode", "supplierIdByName", "bump", "window",
+    grab("codeFromName") + "\n" + grab("importItems") + "\nreturn importItems;")(
+    D, itemByCode, (s) => s || "", () => {}, { logAudit: () => {}, persist: () => {} });
+
+  const r1 = run([
+    { name: "USB-C Cable 1m", price: "12.00" },                    // no code — the new normal
+    { name: "USB-C Cable 1m ", price: "14.00" },                   // same name again in one file
+    { name: "No price here" },                                     // new item without a price
+    { code: "", name: "", price: "9.99" },                         // nothing to identify it
+    { name: "***", price: "1.00" },                                // name with no usable characters
+  ]);
+  ok(INV.some((x) => x.code === "USB-C-CABLE-1M"),
+    "a row with only description and price creates the item, code built from the description");
+  ok(typeof r1 === "string" && /2 rows skipped/.test(r1),
+    "rows without a description, or new items without a sales price, are skipped and said so");
+  ok(INV.some((x) => x.code === "ITEM"),
+    "a description with no usable characters still gets a code rather than being dropped");
+
+  // Second row with the same name matched the freshly created item BY NAME and
+  // updated it — no USB-C-CABLE-1M-2 duplicate from one file or a re-import.
+  ok(!INV.some((x) => x.code === "USB-C-CABLE-1M-2"),
+    "re-importing the same description updates the item instead of duplicating it with a -2 code");
+  ok(INV.find((x) => x.code === "USB-C-CABLE-1M").price === 14,
+    "…and the later row's price wins, exactly like an update should");
+
+  const before = INV.length;
+  run([{ name: "usb-c cable 1m", price: "15.00" }]);
+  ok(INV.length === before && INV.find((x) => x.code === "USB-C-CABLE-1M").price === 15,
+    "name matching is case-insensitive, so a re-import in different casing still updates");
+
+  // The old update-by-code path is untouched: a price-only row must not zero stock.
+  run([{ code: "OLD-1", name: "Old Widget", price: "6.50" }]);
+  const old = INV.find((x) => x.code === "OLD-1");
+  ok(old.price === 6.5 && old.stock === 10 && old.cost === 2,
+    "updating an existing item by code changes only the supplied fields");
+
+  // A genuinely different item whose slug collides gets a suffix.
+  INV.push({ code: "TEST-PART", name: "Something else", price: 1 });
+  run([{ name: "Test Part!", price: "3.00" }]);
+  ok(INV.some((x) => x.code === "TEST-PART-2" && x.price === 3),
+    "a new item whose generated code collides with an existing SKU gets -2, not an overwrite");
+
+  const cols = /key: "name", label: "Description", required: true/.test(src)
+    && /key: "price", label: "Sales Price", required: true/.test(src)
+    && /key: "code", label: "Item Code", hint/.test(src);
+  ok(cols, "the import screen marks Description and Sales Price required and Item Code optional");
+}
+
 function testOpeningBalances() {
   section("Opening balances (all balance-sheet accounts, offset to 3900)");
   const src = fs.readFileSync(path.join(ROOT, "public/app/screens-c.jsx"), "utf8");
@@ -1573,6 +1633,7 @@ function testHistorySettings() {
     testInlineCategory();
     testCsvTemplate();
     testProfitFix();
+    testInventoryImport();
     testOpeningBalances();
   } catch (e) {
     console.error("\nHarness error:", e.message);

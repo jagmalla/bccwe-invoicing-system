@@ -666,13 +666,39 @@ function Inventory({ go, pushToast, initTab }) {
     pushToast && pushToast(item.code + (st === "dead" ? " → Dead stock" : st === "notmoving" ? " → Not moving" : " restored to active stock"));
     bump();
   }
+  // Turn a description into a unique SKU for rows imported without a code:
+  // "USB-C Cable 1m" → USB-C-CABLE-1M, with -2/-3… when the name repeats.
+  function codeFromName(name, taken) {
+    let base = String(name).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24).replace(/-+$/, "");
+    if (!base) base = "ITEM";
+    let code = base, i = 2;
+    while (taken[code] || itemByCode(code)) { code = base + "-" + i; i++; }
+    taken[code] = true;
+    return code;
+  }
+
   function importItems(objs) {
-    let n = 0;
+    let n = 0, skipped = 0;
+    const taken = {};
     objs.forEach((o) => {
-      const code = (o.code || "").trim();
-      if (!code) return;
+      let code = (o.code || "").trim();
+      const name = (o.name || "").trim();
       const num = (v, d) => { const x = parseFloat(String(v).replace(/[^0-9.\-]/g, "")); return isNaN(x) ? d : x; };
-      const existing = itemByCode(code);
+      // Only the description and sales price are mandatory (a code alone still
+      // works for updating an existing item). A codeless row is matched to an
+      // existing item BY NAME first, so re-importing the same file updates
+      // rather than duplicating everything under -2 codes.
+      let existing = code ? itemByCode(code) : null;
+      if (!code) {
+        if (!name) { skipped++; return; }
+        existing = D.inventory.find((x) => (x.name || "").trim().toLowerCase() === name.toLowerCase()) || null;
+        if (existing) code = existing.code;
+      }
+      if (!existing) {
+        if (!name && !code) { skipped++; return; }
+        if (String(o.price || "").trim() === "") { skipped++; return; }   // new items need a sales price
+        if (!code) code = codeFromName(name, taken);
+      }
       if (existing) {
         // For EXISTING items only overwrite fields the row actually supplies —
         // a price-only update CSV must not zero stock/cost or reset the
@@ -698,28 +724,31 @@ function Inventory({ go, pushToast, initTab }) {
       n++;
     });
     bump();
-    window.logAudit("IMPORT", "Product", "inventory_items", n + " items", "Imported " + n + " inventory item" + (n === 1 ? "" : "s") + " from CSV");
+    window.logAudit("IMPORT", "Product", "inventory_items", n + " items", "Imported " + n + " inventory item" + (n === 1 ? "" : "s") + " from CSV"
+      + (skipped ? " (" + skipped + " row(s) skipped — no description, or a new item with no sales price)" : ""));
     if (window.persist) window.persist("inventory");
-    return n;
+    return skipped
+      ? n + " item" + (n === 1 ? "" : "s") + " imported · " + skipped + " row" + (skipped === 1 ? "" : "s") + " skipped (no description, or a new item with no sales price)"
+      : n;
   }
 
   const importCfg = {
     title: "Import inventory",
     entityFile: "BCCWE-inventory",
     columns: [
-      { key: "code", label: "Item Code", required: true, hint: "Unique SKU" },
-      { key: "name", label: "Description" },
+      { key: "name", label: "Description", required: true },
+      { key: "price", label: "Sales Price", required: true },
+      { key: "code", label: "Item Code", hint: "Blank = created from the description" },
       { key: "cat", label: "Category", hint: "Phone / Part / Accessory…" },
       { key: "supplier", label: "Supplier", hint: "Matched by name" },
       { key: "cost", label: "Cost Price" },
-      { key: "price", label: "Sales Price" },
       { key: "stock", label: "Stock" },
       { key: "bonus", label: "Bonus" },
       { key: "alert", label: "Stock Alert" },
     ],
     sample: [
       { code: "EX-CABLE-1M", name: "USB-C Cable 1m", cat: "Accessory", supplier: "Pacific Parts Distribution", cost: "2.50", price: "12.00", stock: "40", bonus: "4", alert: "10" },
-      { code: "EX-SCRN-X", name: "Example Screen Assembly", cat: "Part", supplier: "Surrey Screen Supply", cost: "55.00", price: "139.00", stock: "8", bonus: "0", alert: "5" },
+      { code: "", name: "Example Screen Assembly", cat: "Part", supplier: "Surrey Screen Supply", cost: "55.00", price: "139.00", stock: "8", bonus: "0", alert: "5" },
     ],
     onImport: importItems,
   };
