@@ -707,6 +707,179 @@ function histOverdueDays(r) {
   return d > 0 ? d : null;
 }
 
+/* ---------------- Imported profit fix ----------------
+   Invoices brought over from the old POS arrived with no cost on their lines,
+   so every one of them reports 100% gross profit. This stamps a blended cost
+   (net price × (100 − margin%) / 100) onto every line of every document under
+   one salesperson — the marker the imported records were filed under — so the
+   historical books show a realistic margin. It must touch all three places
+   profit is read from, or the reports disagree with each other:
+     inv.lines[].cost      → the P&L / accounting engine
+     itemSales[].cost      → the Sales & profit tab
+     creditNote lines      → returns must reverse the same cost the sale charged */
+function profitMarginPlan(opts) {
+  var D = BCCWE;
+  var o = opts || {};
+  var salesId = o.salesId || "";
+  var pct = o.marginPct != null ? +o.marginPct : 27.86;
+  var ratio = Math.round((100 - pct) * 100) / 10000; // cost as a fraction of net price
+  var r2 = function (n) { return Math.round(n * 100) / 100; };
+  var net = function (l) { return (l.price || 0) * (1 - ((l.disc || 0) / 100)); };
+  var onlyMissing = !!o.onlyMissing;
+  var skip = function (l) { return onlyMissing && (l.cost || 0) > 0.005; };
+
+  var invoices = [], lineCount = 0, revenue = 0, oldCogs = 0, newCogs = 0, noLines = 0;
+  var keys = {};   // date|clientId|code → new cost, for matching itemSales rows
+  var invNos = {};
+  (D.invoices || []).forEach(function (inv) {
+    if ((inv.sales || "") !== salesId) return;
+    if (inv.kind === "order") return;                    // an order is not a sale yet
+    if (!inv.lines || !inv.lines.length) { noLines++; return; }
+    var lines = [];
+    inv.lines.forEach(function (l) {
+      var qty = l.qty || 0, n = net(l);
+      revenue += qty * n;
+      oldCogs += qty * (l.cost || 0);
+      if (skip(l)) { newCogs += qty * (l.cost || 0); return; }
+      var c = r2(n * ratio);
+      newCogs += qty * c;
+      lines.push({ l: l, cost: c });
+      lineCount++;
+      if (l.code) keys[inv.date + "|" + (inv.clientId || "") + "|" + l.code] = c;
+    });
+    if (lines.length) { invoices.push({ inv: inv, lines: lines }); invNos[inv.no] = true; }
+  });
+
+  // Imported itemSales rows carry no invoice link (only the generator stamps
+  // `inv`), so they are matched by date + client + item code — and any row the
+  // generator DID stamp is left alone, whatever it matches.
+  var sales = [];
+  (D.itemSales || []).forEach(function (s) {
+    if (s.inv) return;
+    var k = s.date + "|" + (s.clientId || "") + "|" + s.code;
+    if (keys[k] == null || skip(s)) return;
+    sales.push({ s: s, cost: keys[k] });
+  });
+
+  var credits = [];
+  (D.creditNotes || []).forEach(function (cn) {
+    if (!invNos[cn.origInv]) return;
+    var ls = [];
+    (cn.items || []).forEach(function (l) { if (!skip(l)) ls.push({ l: l, cost: r2(net(l) * ratio) }); });
+    (cn.exchangeItems || []).forEach(function (l) { if (!skip(l)) ls.push({ l: l, cost: r2(net(l) * ratio) }); });
+    if (ls.length) credits.push({ cn: cn, lines: ls });
+  });
+
+  return {
+    invoices: invoices, sales: sales, credits: credits,
+    lineCount: lineCount, noLines: noLines,
+    revenue: r2(revenue), oldCogs: r2(oldCogs), newCogs: r2(newCogs),
+    oldPct: revenue > 0.005 ? Math.round(((revenue - oldCogs) / revenue) * 10000) / 100 : 0,
+    newPct: revenue > 0.005 ? Math.round(((revenue - newCogs) / revenue) * 10000) / 100 : 0,
+  };
+}
+
+function ProfitFixModal({ pushToast, onClose, onDone }) {
+  const D = BCCWE;
+  const people = D.salespeople || [];
+  // The imported records were filed under a marker salesperson — preselect the
+  // one that looks like it, but let the user pick.
+  const guess = people.find((p) => /kash/i.test(p.name || ""));
+  const [salesId, setSalesId] = useState(guess ? guess.id : "");
+  const [pct, setPct] = useState("27.86");
+  const [onlyMissing, setOnlyMissing] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const pctN = parseFloat(pct);
+  const pctOk = !isNaN(pctN) && pctN >= 0 && pctN < 100;
+  const plan = (salesId && pctOk) ? profitMarginPlan({ salesId, marginPct: pctN, onlyMissing }) : null;
+  const nameOf = (id) => (people.find((p) => p.id === id) || {}).name || id;
+  const valid = !!plan && plan.invoices.length > 0;
+
+  async function apply() {
+    if (!valid || busy) return;
+    setBusy(true);
+    const undo = [];
+    plan.invoices.forEach((t) => t.lines.forEach((x) => { undo.push([x.l, x.l.cost]); x.l.cost = x.cost; }));
+    plan.sales.forEach((x) => { undo.push([x.s, x.s.cost]); x.s.cost = x.cost; });
+    plan.credits.forEach((t) => t.lines.forEach((x) => { undo.push([x.l, x.l.cost]); x.l.cost = x.cost; }));
+    window.logAudit && window.logAudit("UPDATE", "Invoice", "invoices", "",
+      "Set " + pctN + "% gross margin on " + plan.invoices.length + " imported invoice(s) under "
+      + nameOf(salesId) + " (" + plan.lineCount + " lines, " + plan.sales.length + " item-sale rows, "
+      + plan.credits.length + " return(s))");
+    const keys = ["invoices"];
+    if (plan.sales.length) keys.push("itemSales");
+    if (plan.credits.length) keys.push("creditNotes");
+    const ok = window.persistNow ? await window.persistNow.apply(null, keys) : true;
+    if (!ok) {
+      undo.forEach(([rec, v]) => { rec.cost = v; });
+      setBusy(false);
+      pushToast && pushToast("Couldn't save — no connection. Nothing was changed.");
+      return;
+    }
+    pushToast && pushToast(plan.invoices.length + " invoices set to " + pctN + "% gross margin");
+    onDone && onDone();
+    onClose();
+  }
+
+  return (
+    <Modal title="Fix imported profit" onClose={onClose} wide
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" disabled={!valid || busy} onClick={apply}>
+          {busy ? "Saving…" : plan && plan.invoices.length
+            ? "Set " + pctN + "% margin on " + plan.invoices.length + " invoice" + (plan.invoices.length === 1 ? "" : "s")
+            : "Nothing to fix"}
+        </Btn>
+      </>}>
+      <p className="rail-note" style={{ marginTop: 0 }}>
+        Invoices imported from the old POS carry no product cost, so reports show them as 100% profit.
+        This stamps a blended cost onto every line under the salesperson the imports were filed under,
+        so historical reports show the margin the business actually ran at. Invoices entered in this
+        system keep their real recorded costs — only the chosen salesperson's documents are touched.
+      </p>
+      <div className="meta-grid">
+        <Field label="Imported documents are under" required>
+          <select value={salesId} onChange={(e) => setSalesId(e.target.value)}>
+            <option value="">Choose a salesperson…</option>
+            {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Gross profit %" hint="27.86 means each line's cost becomes 72.14% of its net price">
+          <input type="number" step="0.01" min="0" max="99.99" value={pct} onChange={(e) => setPct(e.target.value)} />
+        </Field>
+      </div>
+      <label className="email-pick" style={{ marginTop: 8 }}>
+        <input type="checkbox" checked={onlyMissing} onChange={() => setOnlyMissing((v) => !v)} />
+        <span>Only lines with no cost yet — keep any real costs already recorded</span>
+      </label>
+
+      {!pctOk && <div className="inline-note"><Icon name="alert" size={15} /> The margin must be a number from 0 to 99.99.</div>}
+      {plan && !plan.invoices.length && (
+        <div className="inline-note"><Icon name="alert" size={15} /> No documents under this salesperson have lines to fix.</div>
+      )}
+      {plan && plan.invoices.length > 0 && (
+        <>
+          <div className="inline-note" style={{ background: "var(--accent-soft)", color: "var(--accent-ink)" }}>
+            <Icon name="alert" size={15} /> {plan.invoices.length} invoice(s) · {plan.lineCount} line(s) ·
+            {" "}{plan.sales.length} item-sale row(s) · {plan.credits.length} return(s)/exchange(s).
+            Gross profit goes from <strong>{plan.oldPct}%</strong> to <strong>{plan.newPct}%</strong> on
+            {" "}{fmt(plan.revenue)} of revenue — cost recorded rises {fmt(plan.newCogs - plan.oldCogs)}.
+          </div>
+          {plan.noLines > 0 && (
+            <div className="inline-note"><Icon name="alert" size={15} /> {plan.noLines} invoice(s) under this
+              salesperson have no line items stored and are left unchanged.</div>
+          )}
+          <div className="inline-note" style={{ background: "var(--red-soft)", color: "#a5322d" }}>
+            <Icon name="alert" size={15} /> This rewrites the recorded cost on those lines. Running it again
+            with the same margin changes nothing, but there is no undo button — the audit log records what was done.
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
 /* ---------------- Bulk salesperson assignment ----------------
    Invoices imported from an older system arrive with no salesperson, and fixing
    them one at a time is not realistic. This picks out exactly which documents a
@@ -897,6 +1070,7 @@ function InvoiceHistory({ go, pushToast, store }) {
   const [emailInv, setEmailInv] = useState(null);
   const [showImport, setShowImport] = useState(false);
   const [showTaxFix, setShowTaxFix] = useState(false);
+  const [showProfitFix, setShowProfitFix] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAssign, setShowAssign] = useState(false);
   const [, setRev] = useState(0);
@@ -1105,6 +1279,7 @@ function InvoiceHistory({ go, pushToast, store }) {
           <Btn variant="ghost" icon="download" onClick={exportExcel}>Export Excel</Btn>
           {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="people" onClick={() => setShowAssign(true)}>Assign salesperson</Btn>}
           {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="receipt" onClick={() => setShowTaxFix(true)}>Fix imported tax</Btn>}
+          {!!(window.STORES && window.STORES.isAdmin()) && <Btn variant="ghost" icon="report" onClick={() => setShowProfitFix(true)}>Fix imported profit</Btn>}
           <Btn variant="primary" icon="plus" onClick={() => go("invoice")}>New invoice</Btn>
         </>} />
 
@@ -1258,6 +1433,10 @@ function InvoiceHistory({ go, pushToast, store }) {
       )}
       {showTaxFix && (
         <TaxSplitModal store={sf} pushToast={pushToast} onClose={() => setShowTaxFix(false)} />
+      )}
+      {showProfitFix && (
+        <ProfitFixModal pushToast={pushToast} onClose={() => setShowProfitFix(false)}
+          onDone={() => setRev((n) => n + 1)} />
       )}
       {showEmail && (
         <EmailHistoryModal spec={buildExportSpec()} range={range} go={go}

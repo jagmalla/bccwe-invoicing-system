@@ -1036,6 +1036,80 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testProfitFix() {
+  section("Imported profit fix (blended margin on one salesperson's documents)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
+  const m = /function\s+profitMarginPlan\s*\(/.exec(src);
+  let i = src.indexOf("{", src.indexOf(")", m.index)), d = 0, e = -1;
+  for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+  const fn = src.slice(m.index, e);
+
+  const DB = {
+    invoices: [
+      { no: "K1", sales: "u_kashoo", date: "2026-03-01", clientId: "c1", lines: [
+        { code: "A", qty: 2, price: 100, disc: 0, cost: 0 },
+        { code: "B", qty: 1, price: 50, disc: 10, cost: 0 },      // net 45.00
+        { desc: "Labour", code: "", qty: 1, price: 30, disc: 0, cost: 0 },
+      ] },
+      { no: "K2", sales: "u_kashoo", date: "2026-03-02", clientId: "c2", lines: [
+        { code: "A", qty: 1, price: 200, disc: 0, cost: 90 },     // already has a real cost
+      ] },
+      { no: "K3", sales: "u_kashoo", date: "2026-03-03", clientId: "c1" },          // no lines stored
+      { no: "K4", sales: "u_kashoo", date: "2026-03-04", clientId: "c1", kind: "order", lines: [
+        { code: "A", qty: 1, price: 100, disc: 0, cost: 0 } ] },  // an order, not a sale
+      { no: "N1", sales: "u_priya", date: "2026-03-01", clientId: "c1", lines: [
+        { code: "A", qty: 1, price: 100, disc: 0, cost: 40 } ] }, // another salesperson
+    ],
+    itemSales: [
+      { date: "2026-03-01", clientId: "c1", code: "A", qty: 2, price: 100, disc: 0, cost: 0 },      // K1's row
+      { date: "2026-03-01", clientId: "c1", code: "A", qty: 1, price: 100, disc: 0, cost: 40, inv: "N1" }, // generator-stamped
+      { date: "2026-03-09", clientId: "c9", code: "A", qty: 1, price: 100, disc: 0, cost: 33 },     // unrelated register row
+    ],
+    creditNotes: [
+      { no: "CN1", origInv: "K1", retDisp: "Inventory", items: [{ code: "A", qty: 1, price: 100, disc: 0, cost: 0 }],
+        exchangeItems: [{ code: "B", qty: 1, price: 50, disc: 0, cost: 0 }] },
+      { no: "CN2", origInv: "N1", items: [{ code: "A", qty: 1, price: 100, disc: 0, cost: 40 }] },
+    ],
+  };
+  const T = new Function("BCCWE", fn + "\nreturn profitMarginPlan;")(DB);
+
+  const p = T({ salesId: "u_kashoo", marginPct: 27.86 });
+  ok(p.invoices.length === 2 && p.invoices.map((t) => t.inv.no).join(",") === "K1,K2",
+    "only the chosen salesperson's real invoices are targeted — no other salesperson, no orders");
+  ok(p.noLines === 1, "an invoice with no stored lines is counted and left alone rather than guessed at");
+
+  const k1 = p.invoices[0];
+  ok(k1.lines[0].cost === 72.14, "a $100 line gets cost 72.14 — exactly 27.86% gross profit");
+  ok(k1.lines[1].cost === 32.46, "a discounted line is costed on its NET price (45.00 × .7214 = 32.46)");
+  ok(k1.lines[2].cost === 21.64, "a description-only labour line is costed too, so the invoice's own margin is right");
+  ok(Math.abs(p.newPct - 27.86) < 0.03, "the blended result lands on the asked-for margin (" + p.newPct + "%)");
+  ok(p.oldPct > 70, "the before figure shows the problem being fixed (was " + p.oldPct + "% profit)");
+
+  ok(p.sales.length === 1 && p.sales[0].s.qty === 2 && p.sales[0].cost === 72.14,
+    "the matching item-sale row is fixed with the same cost as its invoice line");
+  ok(DB.itemSales[1].cost === 40 && DB.itemSales[2].cost === 33,
+    "generator-stamped and unrelated register rows are never touched");
+
+  ok(p.credits.length === 1 && p.credits[0].cn.no === "CN1" && p.credits[0].lines.length === 2,
+    "returns and exchanges against a fixed invoice get the same economics; others are left alone");
+  ok(p.credits[0].lines[0].cost === 72.14 && p.credits[0].lines[1].cost === 36.07,
+    "a returned $100 item reverses 72.14 of cost — the same cost the sale charged");
+
+  // onlyMissing keeps real recorded costs.
+  const p2 = T({ salesId: "u_kashoo", marginPct: 27.86, onlyMissing: true });
+  ok(p2.invoices.map((t) => t.inv.no).join(",") === "K1",
+    "'only lines with no cost' skips the invoice whose one line already has a real cost");
+
+  // Idempotent: apply, then re-plan — the books must not move a second time.
+  p.invoices.forEach((t) => t.lines.forEach((x) => { x.l.cost = x.cost; }));
+  p.sales.forEach((x) => { x.s.cost = x.cost; });
+  p.credits.forEach((t) => t.lines.forEach((x) => { x.l.cost = x.cost; }));
+  const p3 = T({ salesId: "u_kashoo", marginPct: 27.86 });
+  ok(Math.abs(p3.newCogs - p3.oldCogs) < 0.01,
+    "running the fix twice with the same margin changes nothing");
+  ok(DB.invoices[4].lines[0].cost === 40, "the other salesperson's real cost survives everything");
+}
+
 function testCsvTemplate() {
   section("CSV import template (round-trips through the app's own parser)");
   const usrc = fs.readFileSync(path.join(ROOT, "public/app/ui.jsx"), "utf8");
@@ -1461,6 +1535,7 @@ function testHistorySettings() {
     testSortHeaders();
     testInlineCategory();
     testCsvTemplate();
+    testProfitFix();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);
