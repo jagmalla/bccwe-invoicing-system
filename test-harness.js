@@ -1036,6 +1036,43 @@ function testInventorySettings() {
   ok(numOn, "the barcode image honours 'show the number under the bars', defaulting to on");
 }
 
+function testOpeningBalances() {
+  section("Opening balances (all balance-sheet accounts, offset to 3900)");
+  const src = fs.readFileSync(path.join(ROOT, "public/app/screens-c.jsx"), "utf8");
+  const m = /function\s+openingEntryLines\s*\(/.exec(src);
+  let i = src.indexOf("{", src.indexOf(")", m.index)), d = 0, e = -1;
+  for (let k = i; k < src.length; k++) { if (src[k] === "{") d++; else if (src[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+  const F = new Function(src.slice(m.index, e) + "\nreturn openingEntryLines;")();
+
+  // The situation on the user's books: set Owner's Equity from −2,058,394.82
+  // back to a real invested figure, and nudge the bank at the same time.
+  const jl = F([
+    { code: "1010", type: "Asset", delta: 500 },              // bank up 500 → debit
+    { code: "2100", type: "Liability", delta: -1000 },        // GST payable down → debit
+    { code: "3000", type: "Equity", delta: 2108394.82 },      // equity up → credit
+  ]);
+  const get = (a) => jl.find((l) => l.acct === a) || { dr: 0, cr: 0 };
+  ok(get("1010").dr === 500 && get("2100").dr === 1000 && get("3000").cr === 2108394.82,
+    "asset up = debit, liability down = debit, equity up = credit — each side is right");
+  const dr = jl.reduce((s, l) => s + (l.dr || 0), 0), cr = jl.reduce((s, l) => s + (l.cr || 0), 0);
+  ok(Math.abs(dr - cr) < 0.005, "the posted entry always balances (debits " + dr.toFixed(2) + " = credits " + cr.toFixed(2) + ")");
+  ok(get("3900").dr > 0 && !jl.some((l) => l.acct === "3000" && l.dr),
+    "the offset lands in 3900 Retained Earnings — Owner's Equity is never the dumping ground again");
+
+  ok(F([{ code: "1010", type: "Asset", delta: 300 }, { code: "2000", type: "Liability", delta: 300 }])
+    .every((l) => l.acct !== "3900"),
+    "when the typed targets already balance each other, no offset line is added at all");
+
+  const jd = F([{ code: "1000", type: "Asset", delta: -75.25 }]);
+  ok(jd[0].cr === 75.25 && jd[1].acct === "3900" && jd[1].dr === 75.25,
+    "lowering an asset credits it, with the debit side going to 3900");
+
+  // The modal itself: equity accounts are offered, 3900 is not.
+  const modal = /function OpeningBalancesModal[\s\S]*?const rows0[\s\S]*?;/.exec(src)[0];
+  ok(/a\.type === "Equity"/.test(modal), "equity accounts can now be given an opening balance");
+  ok(/a\.code !== "3900"/.test(modal), "3900 cannot be typed at — it is derived, so it is only ever the offset");
+}
+
 function testProfitFix() {
   section("Imported profit fix (blended margin on one salesperson's documents)");
   const src = fs.readFileSync(path.join(ROOT, "public/app/screens-a.jsx"), "utf8");
@@ -1536,6 +1573,7 @@ function testHistorySettings() {
     testInlineCategory();
     testCsvTemplate();
     testProfitFix();
+    testOpeningBalances();
   } catch (e) {
     console.error("\nHarness error:", e.message);
     process.exit(2);

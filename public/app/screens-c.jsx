@@ -498,11 +498,35 @@ function ManualJEModal({ onSave, onClose }) {
   );
 }
 
-/* ---- Guided opening-balance adjustment (one balanced manual entry) ---- */
+/* ---- Guided opening-balance adjustment (one balanced manual entry) ----
+   Every balance-sheet account can be set to its real figure — assets,
+   liabilities AND equity. The one exception is 3900 Retained Earnings: it is
+   derived (accumulated income plus the balancing figure), so it cannot be
+   typed at; instead it is where the entry's offset lands. Sending the offset
+   there — not to 3000 as before — keeps Owner's Equity meaning what the owner
+   actually put in, instead of quietly becoming the dumping ground for every
+   adjustment (which is exactly how a −$2M Owner's Equity happens). */
+function openingEntryLines(deltas) {
+  let net = 0; // running debits − credits
+  const jl = [];
+  (deltas || []).forEach((r) => {
+    if (r.type === "Asset") {          // debit-normal: raising it is a debit
+      if (r.delta > 0) jl.push({ acct: r.code, dr: r.delta, cr: 0 }); else jl.push({ acct: r.code, dr: 0, cr: -r.delta });
+      net += r.delta;
+    } else {                           // Liability / Equity: raising it is a credit
+      if (r.delta > 0) jl.push({ acct: r.code, dr: 0, cr: r.delta }); else jl.push({ acct: r.code, dr: -r.delta, cr: 0 });
+      net -= r.delta;
+    }
+  });
+  if (Math.abs(net) > 0.005) jl.push(net > 0 ? { acct: "3900", dr: 0, cr: +net.toFixed(2) } : { acct: "3900", dr: +(-net).toFixed(2), cr: 0 });
+  return jl;
+}
+
 function OpeningBalancesModal({ store, onSave, onClose }) {
   const D = BCCWE;
   const live = liveAccountBalances(store || "all");
-  const rows0 = D.accounts.filter((a) => a.type === "Asset" || a.type === "Liability")
+  const rows0 = D.accounts
+    .filter((a) => (a.type === "Asset" || a.type === "Liability" || a.type === "Equity") && a.code !== "3900")
     .map((a) => ({ code: a.code, name: a.name, type: a.type, current: +((live[a.code] || 0)).toFixed(2) }));
   const [date, setDate] = useState(D.today);
   const [vals, setVals] = useState(() => { const m = {}; rows0.forEach((r) => { m[r.code] = String(r.current); }); return m; });
@@ -510,20 +534,7 @@ function OpeningBalancesModal({ store, onSave, onClose }) {
     .map((r) => ({ ...r, target: parseFloat(vals[r.code]) || 0 }))
     .map((r) => ({ ...r, delta: +(r.target - r.current).toFixed(2) }))
     .filter((r) => Math.abs(r.delta) > 0.005);
-  // Build the balanced entry: each account moves to its target; the net
-  // difference offsets to 3000 Owner's Equity (the standard opening treatment).
-  let net = 0; // running debits − credits
-  const jl = [];
-  deltas.forEach((r) => {
-    if (r.type === "Asset") {
-      if (r.delta > 0) jl.push({ acct: r.code, dr: r.delta, cr: 0 }); else jl.push({ acct: r.code, dr: 0, cr: -r.delta });
-      net += r.delta;
-    } else {
-      if (r.delta > 0) jl.push({ acct: r.code, dr: 0, cr: r.delta }); else jl.push({ acct: r.code, dr: -r.delta, cr: 0 });
-      net -= r.delta;
-    }
-  });
-  if (Math.abs(net) > 0.005) jl.push(net > 0 ? { acct: "3000", dr: 0, cr: +net.toFixed(2) } : { acct: "3000", dr: +(-net).toFixed(2), cr: 0 });
+  const jl = openingEntryLines(deltas);
   const valid = deltas.length > 0;
   function submit() {
     if (!valid) return;
@@ -540,9 +551,10 @@ function OpeningBalancesModal({ store, onSave, onClose }) {
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
         <Btn variant="primary" icon="check" disabled={!valid} onClick={submit}>Post adjustment{deltas.length ? " (" + deltas.length + " account" + (deltas.length === 1 ? "" : "s") + ")" : ""}</Btn>
       </>}>
-      <p className="import-lead">Type each account's <strong>real balance as of the date below</strong>. One balanced journal entry is posted
-        moving every changed account to its target; the net difference goes to <strong>3000 Owner's Equity</strong>.
-        Perfect after importing history — e.g. set Bank to what's actually in the bank.</p>
+      <p className="import-lead">Type each account's <strong>real balance as of the date below</strong> — assets, liabilities and equity.
+        One balanced journal entry is posted moving every changed account to its target; the net difference goes to
+        <strong> 3900 Retained Earnings</strong>, where it merges with accumulated income. 3900 itself cannot be typed at —
+        it is calculated from everything else. The entry shows in the journal, ledger, chart of accounts and balance sheet alike.</p>
       <Field label="As of date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       <table className="data-table compact" style={{ marginTop: 10 }}>
         <thead><tr><th>Account</th><th className="r">Current (derived)</th><th className="r">Actual balance</th><th className="r">Adjustment</th></tr></thead>
