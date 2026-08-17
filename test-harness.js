@@ -1248,6 +1248,47 @@ function testProfitFix() {
   ok(p2.invoices.map((t) => t.inv.no).join(",") === "K1",
     "'only lines with no cost' skips the invoice whose one line already has a real cost");
 
+  // ---- the whole chain: apply the fix, then confirm the P&L AND the per-client
+  // profit view both move. This is the "reports still show 100%" report, proven. ----
+  const csrc = fs.readFileSync(path.join(ROOT, "public/app/screens-c.jsx"), "utf8");
+  const dsrc = fs.readFileSync(path.join(ROOT, "public/app/screens-detail.jsx"), "utf8");
+  const cgrab = (s, n) => {
+    const mm = new RegExp("function\\s+" + n + "\\s*\\(").exec(s);
+    let i = s.indexOf("{", s.indexOf(")", mm.index)), d = 0, e = -1;
+    for (let k = i; k < s.length; k++) { if (s[k] === "{") d++; else if (s[k] === "}") { d--; if (!d) { e = k + 1; break; } } }
+    return s.slice(mm.index, e);
+  };
+  const CH = {
+    today: "2026-08-16", TAX: { modes: {} }, inventory: [], creditNotes: [], cashSales: [], expenses: [], defectiveProducts: [],
+    invoices: [
+      { no: "P1", sales: "u_kashoo", kind: "sale", date: "2026-03-01", clientId: "cA", companyId: "co", total: 210, gst: 10, pst: 0,
+        lines: [{ code: "", desc: "x", qty: 2, price: 100, disc: 0, cost: 0 }] },
+      { no: "P2", sales: "u_kashoo", kind: "sale", date: "2026-03-02", clientId: "cB", companyId: "co", total: 105, gst: 5, pst: 0,
+        lines: [{ code: "", desc: "y", qty: 1, price: 100, disc: 0, cost: 0 }] },
+    ],
+  };
+  const stubs = "function storeMatch(){return true;}function cnMatch(){return true;}function inRange(){return true;}"
+    + "function cnCosts(){return{restock:0,defect:0,exchangeOut:0};}function isStockLossExpense(){return false;}function clientName(id){return id;}";
+  const env = new Function("BCCWE",
+    stubs + "\n" + cgrab(dsrc, "deriveLines") + "\n" + cgrab(csrc, "storeFinance") + "\n" + cgrab(csrc, "clientProfitRows")
+    + "\nreturn { storeFinance, clientProfitRows };")(CH);
+  // profitMarginPlan bound to THIS chain's data (T above is bound to other data).
+  const pmp = new Function("BCCWE", fn + "\nreturn profitMarginPlan;")(CH);
+  const pl0 = env.storeFinance("all", null);
+  const cp0 = env.clientProfitRows("all", null);
+  ok(pl0.grossProfit === 300 && cp0.every((r) => Math.abs(r.margin - 100) < 0.01),
+    "before the fix: P&L and every client row read 100% profit (the bug being fixed)");
+  const plan = pmp({ salesId: "u_kashoo", marginPct: 27.86 });
+  plan.invoices.forEach((t) => t.lines.forEach((x) => { x.l.cost = x.cost; }));  // apply, exactly as the modal does
+  const pl1 = env.storeFinance("all", null);
+  const cp1 = env.clientProfitRows("all", null);
+  ok(Math.abs(pl1.grossProfit / pl1.revenue * 100 - 27.86) < 0.05,
+    "after the fix the P&L gross margin is 27.86% (Reports → Income Statement)");
+  ok(cp1.every((r) => Math.abs(r.margin - 27.86) < 0.1),
+    "…and Income by Client now shows 27.86% per client, reading the same line costs");
+  ok(cp1.find((r) => r.id === "cA").revenue === 200 && cp1.find((r) => r.id === "cA").profit === 55.72,
+    "a client's revenue is unchanged while its profit drops to the real figure ($200 → $55.72)");
+
   // Idempotent: apply, then re-plan — the books must not move a second time.
   p.invoices.forEach((t) => t.lines.forEach((x) => { x.l.cost = x.cost; }));
   p.sales.forEach((x) => { x.s.cost = x.cost; });

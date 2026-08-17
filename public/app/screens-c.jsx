@@ -1792,6 +1792,47 @@ function clientRevenueRows(sf, range) {
   }));
 }
 
+// Revenue AND cost of goods per client, so Income by Client can show profit and
+// margin — not just the top line. Cost comes from the SAME place the P&L reads
+// (each sale's recorded line cost), so this reflects the imported-profit fix and
+// ties to the Income Statement's Gross Profit.
+function clientProfitRows(sf, range) {
+  const D = BCCWE;
+  const inR = (d) => !range || inRange(d || "", range);
+  const map = {};
+  const row = (id) => { const k = id || "__walkin"; return map[k] || (map[k] = { id: k, revenue: 0, cogs: 0 }); };
+  (D.invoices || []).forEach((i) => {
+    if (i.kind === "order" || !storeMatch(i, sf) || !inR(i.date)) return;
+    const r = row(i.clientId);
+    r.revenue += (i.total || 0) - (i.gst || 0) - (i.pst || 0);
+    (deriveLines(i) || []).forEach((l) => { r.cogs += (l.qty || 0) * (l.cost || 0); });
+  });
+  (D.cashSales || []).forEach((s) => {
+    if (!storeMatch(s, sf) || !inR(s.date)) return;
+    const r = row(s.clientId);
+    r.revenue += s.subtotal != null ? s.subtotal : (s.total || 0);
+    r.cogs += (s.cogs || 0) - (s.defLoss || 0);
+  });
+  (D.creditNotes || []).forEach((cn) => {
+    if (!cnMatch(cn, sf) || !inR(cn.date)) return;
+    const cid = cn.clientId || ((D.invoices || []).find((i) => i.no === cn.origInv) || {}).clientId;
+    const r = row(cid);
+    r.revenue += cn.subtotal || 0;
+    const cc = cnCosts(cn);
+    r.cogs += cc.exchangeOut - cc.restock - cc.defect;
+  });
+  return Object.keys(map).map((k) => {
+    const r = map[k];
+    const profit = +(r.revenue - r.cogs).toFixed(2);
+    return {
+      id: k, v: +r.revenue.toFixed(2), revenue: +r.revenue.toFixed(2), cogs: +r.cogs.toFixed(2), profit: profit,
+      margin: r.revenue > 0.005 ? (profit / r.revenue) * 100 : 0,
+      name: k === "__walkin" ? "Walk-in / cash customers" : clientName(k),
+      walkin: k === "__walkin",
+    };
+  });
+}
+
 /* ---------------- Supplier payables (A/P aging) ---------------- */
 function APAgingReport({ store, go }) {
   const D = BCCWE;
@@ -1857,18 +1898,22 @@ function ClientReport({ store, range, go }) {
   const sf = store || "all";
   const [sort, setSort] = useState("value_desc");
   const [q, setQ] = useState("");
-  // Pre-tax revenue from invoices + register sales, net of returns — ties to the
-  // Income Statement's "Sales revenue (net of returns)".
-  const rowsAll = clientRevenueRows(sf, range);
+  // Revenue, cost and profit per client — cost ties to the P&L, so the
+  // imported-profit fix shows here too (revenue alone never changes from it).
+  const rowsAll = clientProfitRows(sf, range);
   const clientReportSorts = {
-    value_desc: { label: "Revenue — high to low", get: (r) => r.v, dir: "desc" },
-    value_asc: { label: "Revenue — low to high", get: (r) => r.v, dir: "asc" },
+    value_desc: { label: "Revenue — high to low", get: (r) => r.revenue, dir: "desc" },
+    value_asc: { label: "Revenue — low to high", get: (r) => r.revenue, dir: "asc" },
+    profit_desc: { label: "Profit — high to low", get: (r) => r.profit, dir: "desc" },
+    profit_asc: { label: "Profit — low to high", get: (r) => r.profit, dir: "asc" },
+    margin_desc: { label: "Margin % — high to low", get: (r) => r.margin, dir: "desc" },
     name_asc: { label: "Client — A to Z", get: (r) => r.name, dir: "asc" },
   };
   const ql = q.trim().toLowerCase();
   const rows = applySort(rowsAll, sort, clientReportSorts).filter((r) => !ql || r.name.toLowerCase().includes(ql));
-  const max = Math.max(1, ...rows.map((r) => r.v)); // guard: no rows / all-zero must not break bar widths
-  const shownTotal = rows.reduce((s, r) => s + r.v, 0);
+  const max = Math.max(1, ...rows.map((r) => r.revenue)); // guard: no rows / all-zero must not break bar widths
+  const tot = rows.reduce((a, r) => { a.rev += r.revenue; a.profit += r.profit; return a; }, { rev: 0, profit: 0 });
+  const totMargin = tot.rev > 0.005 ? (tot.profit / tot.rev) * 100 : 0;
   return (
     <div className="statement">
       <div className="stmt-head">
@@ -1876,20 +1921,38 @@ function ClientReport({ store, range, go }) {
         <div className="search" style={{ maxWidth: 260 }}><Icon name="search" size={15} /><input placeholder="Search client…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <SortControl sort={sort} setSort={setSort} defs={clientReportSorts} />
       </div>
-      <div className="bars">
-        {rows.map((r) => (
-          <div className="bar-row" key={r.id}>
-            {go && !r.walkin
-              ? <button className="link bar-lbl" style={{ textAlign: "left" }} title="Open this client's account" onClick={() => go("client/" + r.id)}>{r.name}</button>
-              : <span className="bar-lbl">{r.name}</span>}
-            <div className="bar-track"><div className="bar-fill" style={{ width: Math.max(0, (r.v / max) * 100) + "%" }} /></div>
-            <span className="bar-val mono">{fmt(r.v)}</span>
-          </div>
-        ))}
-        {!rows.length && <Empty icon="people" text={ql ? "No client matches “" + q + "”" : "No client revenue in this period"} />}
-      </div>
-      {rows.length > 0 && <StatementRow label={ql ? "Total (filtered)" : "Total — ties to Sales revenue on the P&L"} value={fmt(shownTotal)} total />}
-      <div className="stmt-note">Pre-tax revenue from invoices and register sales, net of returns and exchanges. Click a client to open their account.</div>
+      <table className="data-table client-inc">
+        <thead><tr>
+          <th>Client</th><th className="r">Revenue</th><th className="r">Cost</th><th className="r">Profit</th><th className="r">Margin</th>
+        </tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td>
+                {go && !r.walkin
+                  ? <button className="link" style={{ textAlign: "left" }} title="Open this client's account" onClick={() => go("client/" + r.id)}>{r.name}</button>
+                  : <span>{r.name}</span>}
+                <div className="ci-bar"><div className="ci-fill" style={{ width: Math.max(0, (r.revenue / max) * 100) + "%" }} /></div>
+              </td>
+              <td className="r mono">{fmt(r.revenue)}</td>
+              <td className="r mono muted">{fmt(r.cogs)}</td>
+              <td className={"r mono" + (r.profit < 0 ? " neg" : "")}>{fmt(r.profit)}</td>
+              <td className="r mono"><span className={r.margin < 0 ? "neg" : "pos"}>{r.margin.toFixed(1)}%</span></td>
+            </tr>
+          ))}
+          {!rows.length && <tr><td colSpan="5"><Empty icon="people" text={ql ? "No client matches “" + q + "”" : "No client revenue in this period"} /></td></tr>}
+        </tbody>
+        {rows.length > 0 && (
+          <tfoot><tr className="hist-tot">
+            <td><strong>{ql ? "Total (filtered)" : "Total — ties to the P&L"}</strong></td>
+            <td className="r mono strong">{fmt(tot.rev)}</td>
+            <td className="r mono strong">{fmt(tot.rev - tot.profit)}</td>
+            <td className="r mono strong">{fmt(tot.profit)}</td>
+            <td className="r mono strong">{totMargin.toFixed(1)}%</td>
+          </tr></tfoot>
+        )}
+      </table>
+      <div className="stmt-note">Pre-tax revenue net of returns, and gross profit after each sale's recorded cost — the same cost the Income Statement uses. Click a client to open their account.</div>
     </div>
   );
 }

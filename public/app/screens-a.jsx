@@ -60,6 +60,12 @@ function Dashboard({ go, store }) {
     cns.filter((c) => inMonth(c.date)).reduce((s, c) => s + (c.subtotal || 0), 0);
   const _bal = (typeof storeBalances === "function") ? storeBalances(sf) : { cash: 0 };
   const _fin = (typeof storeFinance === "function") ? storeFinance(sf) : { gst: 0, pst: 0 };
+  // Month-to-date gross profit + margin, from the same engine as the P&L — so the
+  // dashboard reflects real profit, not just the revenue top line.
+  const _finMTD = (typeof storeFinance === "function")
+    ? storeFinance(sf, { from: ym + "-01", to: D.today }) : { grossProfit: 0, revenue: 0, restock: 0, writeOff: 0 };
+  const gpMTD = (_finMTD.grossProfit || 0) + (_finMTD.restock || 0) - (_finMTD.writeOff || 0);
+  const gpMargin = _finMTD.revenue > 0.005 ? (gpMTD / _finMTD.revenue) * 100 : 0;
   const cashPos = _bal.cash;
   const taxDue = (_fin.gst || 0) - (_fin.gstITC || 0) + (_fin.pst || 0); // net of input tax credits
   const lowStock = D.inventory.filter((i) => i.kind !== "Service" && (i.alert || 0) > 0 && i.stock <= i.alert);
@@ -72,6 +78,7 @@ function Dashboard({ go, store }) {
   // remittance date were decorative fiction.
   const kpis = [
     { label: "Revenue — month to date", value: fmt(mtdRevenue), sub: "Pre-tax · net of returns", ico: "money" },
+    { label: "Gross profit — month to date", value: fmt(gpMTD), sub: gpMargin.toFixed(1) + "% margin · after cost of goods", ico: "ledger" },
     { label: "Outstanding receivables", value: fmt(outstanding), sub: fmt(overdue) + " overdue", ico: "invoice", warn: overdue > 0 },
     { label: "Cash & bank", value: fmt(cashPos), sub: "Collected to date", ico: "ledger" },
     { label: "GST + PST payable", value: fmt(taxDue), sub: "Net of input tax credits", ico: "receipt" },
