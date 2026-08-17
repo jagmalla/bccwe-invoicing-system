@@ -669,7 +669,7 @@ function Inventory({ go, pushToast, initTab }) {
   // Turn a description into a unique SKU for rows imported without a code:
   // "USB-C Cable 1m" → USB-C-CABLE-1M, with -2/-3… when the name repeats.
   function codeFromName(name, taken) {
-    let base = String(name).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24).replace(/-+$/, "");
+    let base = skuBase(name);
     if (!base) base = "ITEM";
     let code = base, i = 2;
     while (taken[code] || itemByCode(code)) { code = base + "-" + i; i++; }
@@ -712,13 +712,25 @@ function Inventory({ go, pushToast, initTab }) {
         if (String(o.stock || "").trim() !== "") patch.stock = Math.round(num(o.stock, existing.stock || 0));
         if (String(o.bonus || "").trim() !== "") patch.bonus = Math.round(num(o.bonus, existing.bonus || 0));
         if (String(o.alert || "").trim() !== "") patch.alert = Math.round(num(o.alert, existing.alert || 0));
+        // A supplied barcode is the manufacturer's own — it wins over whatever
+        // is on file. A blank column never clears an existing barcode.
+        const bcIn = String(o.barcode || "").trim();
+        if (bcIn) { patch.barcode = bcIn; patch.barcodeType = (typeof barcodeTypeOf === "function") ? barcodeTypeOf({ barcode: bcIn }) : "EAN8"; }
+        else if (!existing.barcode && typeof genEan8 === "function") { patch.barcode = genEan8(); patch.barcodeType = "EAN8"; }
         Object.assign(existing, patch);
       } else {
+        // Every imported product gets a scannable in-house EAN-8, exactly like
+        // one added by hand — otherwise a whole imported catalogue arrives
+        // unscannable and has to be fixed in a second pass.
         D.inventory.push({
           code, name: o.name || code, cat: o.cat || "Uncategorized",
           supplier: supplierIdByName(o.supplier),
           cost: num(o.cost, 0), price: num(o.price, 0),
           stock: Math.round(num(o.stock, 0)), bonus: Math.round(num(o.bonus, 0)), alert: Math.round(num(o.alert, 0)),
+          barcode: String(o.barcode || "").trim() || (typeof genEan8 === "function" ? genEan8() : ""),
+          barcodeType: String(o.barcode || "").trim()
+            ? ((typeof barcodeTypeOf === "function") ? barcodeTypeOf({ barcode: String(o.barcode).trim() }) : "EAN8")
+            : "EAN8",
         });
       }
       n++;
@@ -739,6 +751,7 @@ function Inventory({ go, pushToast, initTab }) {
       { key: "name", label: "Description", required: true },
       { key: "price", label: "Sales Price", required: true },
       { key: "code", label: "Item Code", hint: "Blank = created from the description" },
+      { key: "barcode", label: "Barcode", hint: "Blank = an EAN-8 is generated" },
       { key: "cat", label: "Category", hint: "Phone / Part / Accessory…" },
       { key: "supplier", label: "Supplier", hint: "Matched by name" },
       { key: "cost", label: "Cost Price" },
@@ -747,8 +760,8 @@ function Inventory({ go, pushToast, initTab }) {
       { key: "alert", label: "Stock Alert" },
     ],
     sample: [
-      { code: "EX-CABLE-1M", name: "USB-C Cable 1m", cat: "Accessory", supplier: "Pacific Parts Distribution", cost: "2.50", price: "12.00", stock: "40", bonus: "4", alert: "10" },
-      { code: "", name: "Example Screen Assembly", cat: "Part", supplier: "Surrey Screen Supply", cost: "55.00", price: "139.00", stock: "8", bonus: "0", alert: "5" },
+      { code: "EX-CABLE-1M", barcode: "0123456789012", name: "USB-C Cable 1m", cat: "Accessory", supplier: "Pacific Parts Distribution", cost: "2.50", price: "12.00", stock: "40", bonus: "4", alert: "10" },
+      { code: "", barcode: "", name: "Example Screen Assembly", cat: "Part", supplier: "Surrey Screen Supply", cost: "55.00", price: "139.00", stock: "8", bonus: "0", alert: "5" },
     ],
     onImport: importItems,
   };
@@ -1461,6 +1474,33 @@ function CategoriesPanel({ pushToast }) {
   );
 }
 
+/* Description → SKU stem: uppercase, single dashes, and trimmed at a WORD
+   boundary rather than mid-word, so a long name gives SAMSUNG-S24-SCREEN
+   instead of SAMSUNG-S24-SCREEN-PROTE. */
+function skuBase(name) {
+  var s = String(name || "").toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (s.length > 24) {
+    s = s.slice(0, 24);
+    var cut = s.lastIndexOf("-");
+    if (cut >= 8) s = s.slice(0, cut);
+  }
+  return s.replace(/-+$/, "");
+}
+
+/* A SKU built from the product's description, unique against everything on
+   file. Services get an SVC- prefix so they stay recognisable in lists. */
+function autoSku(name, isService) {
+  var D = BCCWE;
+  var base = skuBase(name);
+  if (!base) return "";
+  if (isService && base.indexOf("SVC-") !== 0) base = "SVC-" + base.slice(0, 20).replace(/-+$/, "");
+  var taken = {};
+  (D.inventory || []).forEach(function (i) { taken[String(i.code).toUpperCase()] = 1; });
+  var code = base, n = 2;
+  while (taken[code]) { code = base + "-" + n; n++; }
+  return code;
+}
+
 function ItemFormModal({ item, onSave, onClose }) {
   const D = BCCWE;
   const editing = !!item;
@@ -1484,7 +1524,15 @@ function ItemFormModal({ item, onSave, onClose }) {
       : (((D.prefs || {}).barcode || {}).defaultType || "EAN8"),
     store: item ? (item.store || "") : "",
   }));
-  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  // The item code is generated from the description as you type, until you
+  // type a code yourself — then it is left alone, so a deliberate SKU is never
+  // overwritten. Editing an existing item never touches its code.
+  const [codeTouched, setCodeTouched] = useState(!!item);
+  const set = (k, v) => setF((s) => {
+    const next = { ...s, [k]: v };
+    if (k === "name" && !codeTouched && !item) next.code = autoSku(v, s.kind === "Service");
+    return next;
+  });
   const bcProblem = barcodeProblem(f.barcode, f.barcodeType);
   const bcDuplicate = f.barcode && (D.inventory || []).some((x) => x !== item && String(x.barcode || "") === String(f.barcode).trim());
   const [, setCatRev] = useState(0);
@@ -1558,9 +1606,12 @@ function ItemFormModal({ item, onSave, onClose }) {
         <button type="button" className={"miniseg-btn" + (isService ? " on" : "")} onClick={() => set("kind", "Service")}>Service (non-stocked)</button>
       </div>
       <div className="meta-grid">
-        <Field label={isService ? "Service code" : "Item code"} required hint={codeClash ? "⚠ Code already exists" : "Unique SKU"}>
+        <Field label={isService ? "Service code" : "Item code"} required
+          hint={codeClash ? "⚠ Code already exists" : editing ? "Unique SKU — fixed once created"
+            : codeTouched ? "Unique SKU" : "Generated from the description — type here to set your own"}>
           <input value={f.code} disabled={editing} placeholder={isService ? "e.g. SVC-DIAG" : "e.g. IPH-13-128-A"}
-            className={codeClash ? "err" : ""} onChange={(e) => set("code", e.target.value)} />
+            className={codeClash ? "err" : ""}
+            onChange={(e) => { setCodeTouched(true); set("code", e.target.value); }} />
         </Field>
         <Field label="Barcode"
           hint={bcDuplicate ? "⚠ Another product already uses this barcode" : bcProblem ? "⚠ " + bcProblem

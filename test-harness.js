@@ -1049,7 +1049,7 @@ function testInventoryImport() {
   const D = { get inventory() { return INV; } };
   const itemByCode = (c) => INV.find((x) => x.code === c) || null;
   const run = new Function("D", "itemByCode", "supplierIdByName", "bump", "window",
-    grab("codeFromName") + "\n" + grab("importItems") + "\nreturn importItems;")(
+    grab("skuBase") + "\n" + grab("codeFromName") + "\n" + grab("importItems") + "\nreturn importItems;")(
     D, itemByCode, (s) => s || "", () => {}, { logAudit: () => {}, persist: () => {} });
 
   const r1 = run([
@@ -1092,8 +1092,59 @@ function testInventoryImport() {
 
   const cols = /key: "name", label: "Description", required: true/.test(src)
     && /key: "price", label: "Sales Price", required: true/.test(src)
-    && /key: "code", label: "Item Code", hint/.test(src);
-  ok(cols, "the import screen marks Description and Sales Price required and Item Code optional");
+    && /key: "code", label: "Item Code", hint/.test(src)
+    && /key: "barcode", label: "Barcode", hint/.test(src);
+  ok(cols, "the import screen marks Description and Sales Price required, Item Code and Barcode optional");
+
+  // ---- automatic barcodes on import ----
+  const INV2 = [{ code: "HAS-BC", name: "Already Coded", price: 5, barcode: "11111111", barcodeType: "EAN8" },
+                { code: "NO-BC", name: "Needs One", price: 5 }];
+  const D2 = { get inventory() { return INV2; } };
+  let seq = 90000000;
+  const run2 = new Function("D", "itemByCode", "supplierIdByName", "bump", "window", "genEan8", "barcodeTypeOf",
+    grab("skuBase") + "\n" + grab("codeFromName") + "\n" + grab("importItems") + "\nreturn importItems;")(
+    D2, (c) => INV2.find((x) => x.code === c) || null, (s) => s || "", () => {},
+    { logAudit: () => {}, persist: () => {} },
+    () => String(++seq), (it) => (/^\d{13}$/.test(it.barcode) ? "EAN13" : "EAN8"));
+
+  run2([{ name: "Brand New Thing", price: "3.00" }]);
+  const fresh = INV2.find((x) => x.name === "Brand New Thing");
+  ok(fresh && /^\d{8}$/.test(fresh.barcode) && fresh.barcodeType === "EAN8",
+    "an imported item with no barcode column is given a generated EAN-8 automatically");
+
+  run2([{ code: "HAS-BC", name: "Already Coded", price: "5.00" }]);
+  ok(INV2.find((x) => x.code === "HAS-BC").barcode === "11111111",
+    "an item that already has a barcode keeps it — a blank column never clears or replaces one");
+
+  run2([{ code: "NO-BC", name: "Needs One", price: "5.00" }]);
+  ok(/^\d{8}$/.test(INV2.find((x) => x.code === "NO-BC").barcode || ""),
+    "an existing item with no barcode gets one on the next import");
+
+  run2([{ name: "Maker Coded", price: "7.00", barcode: "0123456789012" }]);
+  const mk = INV2.find((x) => x.name === "Maker Coded");
+  ok(mk.barcode === "0123456789012" && mk.barcodeType === "EAN13",
+    "a manufacturer's own barcode in the CSV is used as-is, with its type detected");
+
+  run2([{ code: "HAS-BC", name: "Already Coded", price: "5.00", barcode: "22222222" }]);
+  ok(INV2.find((x) => x.code === "HAS-BC").barcode === "22222222",
+    "a supplied barcode does replace the one on file — that is a deliberate correction");
+
+  // ---- SKU generated from the description in the Add Item form ----
+  const A = new Function("BCCWE", grab("skuBase") + "\n" + grab("autoSku") + "\nreturn autoSku;")({
+    inventory: [{ code: "IPHONE-13-CASE" }, { code: "SVC-SCREEN-REPAIR" }],
+  });
+  ok(A("iPhone 13 Case") === "IPHONE-13-CASE-2",
+    "the form's generated SKU avoids a code that already exists");
+  ok(A("65W USB-C Charger") === "65W-USB-C-CHARGER", "punctuation and spaces become single dashes");
+  ok(A("Screen Repair", true) === "SVC-SCREEN-REPAIR-2",
+    "a service gets an SVC- prefix, and still avoids collisions");
+  ok(A("   ") === "" && A("") === "",
+    "an empty description generates nothing rather than a junk code");
+  const long = A("Samsung S24 Screen Protector Ultra Clear");
+  ok(long.length <= 26 && !/-$/.test(long) && long === "SAMSUNG-S24-SCREEN",
+    "a long description is trimmed at a word boundary, not mid-word (" + long + ")");
+  ok(/if \(k === "name" && !codeTouched && !item\)/.test(src),
+    "the code stops auto-filling the moment you type your own, and never changes on an existing item");
 }
 
 function testOpeningBalances() {
